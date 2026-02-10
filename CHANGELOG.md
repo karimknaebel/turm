@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.0](https://github.com/karimknaebel/turm/compare/v0.11.0...v0.12.0) (2026-02-10)
+
+
+### Features
+
+* add job name to detail window ([#42](https://github.com/karimknaebel/turm/issues/42)) ([0e40ab4](https://github.com/karimknaebel/turm/commit/0e40ab486bea2630f1717cc31e6380446ff0b87f))
+
 ## [0.11.0](https://github.com/karimknaebel/turm/compare/v0.10.0...v0.11.0) (2025-12-23)
 
 
