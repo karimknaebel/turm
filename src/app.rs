@@ -333,7 +333,7 @@ impl App {
 
         let job_detail_log = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(7), Constraint::Min(3)].as_ref())
+            .constraints([Constraint::Length(8), Constraint::Min(3)].as_ref())
             .split(master_detail[1]);
 
         // Help
@@ -465,7 +465,11 @@ impl App {
                 ]);
             }
             let state = Line::from(state_spans);
-
+            let name = Line::from(vec![
+                Span::styled("Name   ", Style::default().fg(Color::Yellow)),
+                Span::raw(" "),
+                Span::raw(&j.name),
+            ]);
             let command = Line::from(vec![
                 Span::styled("Command", Style::default().fg(Color::Yellow)),
                 Span::raw(" "),
@@ -499,7 +503,7 @@ impl App {
                 ),
             ]);
 
-            Text::from(vec![state, command, nodes, tres, stdout])
+            Text::from(vec![state, name, command, nodes, tres, stdout])
         });
         let job_detail = Paragraph::new(job_detail.unwrap_or_default()).block(
             Block::default()
