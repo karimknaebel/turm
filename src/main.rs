@@ -116,7 +116,7 @@ fn input_loop(tx: Sender<std::io::Result<Event>>) {
     while tx.send(event::read()).is_ok() {}
 }
 
-fn run_app<B: Backend>(terminal: &mut Terminal<B>, args: Cli) -> io::Result<()> {
+fn run_app<B: Backend<Error = io::Error>>(terminal: &mut Terminal<B>, args: Cli) -> io::Result<()> {
     let (input_tx, input_rx) = unbounded();
     let mut app = App::new(
         input_rx,

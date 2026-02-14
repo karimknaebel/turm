@@ -1,5 +1,5 @@
 use crossbeam::{
-    channel::{Receiver, unbounded},
+    channel::{Receiver, TryRecvError, unbounded},
     select,
 };
 use itertools::Either;
@@ -9,7 +9,7 @@ use std::{process::Stdio, time::Duration};
 use crate::file_watcher::{FileWatcherError, FileWatcherHandle};
 use crate::job_watcher::JobWatcherHandle;
 
-use crossterm::event::{Event, KeyCode, KeyEvent};
+use crossterm::event::{Event, KeyCode, KeyEvent, MouseButton, MouseEventKind};
 use ratatui::{
     Frame, Terminal,
     backend::Backend,
@@ -57,6 +57,9 @@ pub struct App {
     input_receiver: Receiver<std::io::Result<Event>>,
     output_file_view: OutputFileView,
     job_list_height: u16,
+    job_list_area: Rect,
+    job_output_area: Rect,
+    pending_input_event: Option<Event>,
 }
 
 pub struct Job {
@@ -91,6 +94,24 @@ pub enum AppMessage {
     Jobs(Vec<Job>),
     JobOutput(Result<String, FileWatcherError>),
     Key(KeyEvent),
+    MouseClick(usize),
+    MouseWheel {
+        target: MouseScrollTarget,
+        direction: MouseWheelDirection,
+        amount: u16,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MouseWheelDirection {
+    Up,
+    Down,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MouseScrollTarget {
+    Jobs,
+    Output,
 }
 
 impl App {
@@ -124,34 +145,125 @@ impl App {
             input_receiver,
             output_file_view: OutputFileView::default(),
             job_list_height: 0,
+            job_list_area: Rect::default(),
+            job_output_area: Rect::default(),
+            pending_input_event: None,
         }
     }
 }
 
 impl App {
-    pub fn run<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> io::Result<()> {
+    pub fn run<B: Backend<Error = io::Error>>(
+        &mut self,
+        terminal: &mut Terminal<B>,
+    ) -> io::Result<()> {
         terminal.draw(|f| self.ui(f))?;
 
         loop {
-            select! {
-                recv(self.receiver) -> event => {
-                    self.handle(event.unwrap());
-                }
-                recv(self.input_receiver) -> input_res => {
-                    match input_res.unwrap().unwrap() {
-                        Event::Key(key) => {
-                            if key.code == KeyCode::Char('q') {
-                                return Ok(());
-                            }
-                            self.handle(AppMessage::Key(key));
-                        },
-                        Event::Resize(_, _) => {},
-                        _ => continue, // ignore and do not redraw
+            let (should_quit, should_draw) = if let Some(event) = self.pending_input_event.take() {
+                self.handle_input_event(event)
+            } else {
+                select! {
+                    recv(self.receiver) -> event => {
+                        self.handle(event.unwrap());
+                        (false, true)
+                    }
+                    recv(self.input_receiver) -> input_res => {
+                        self.handle_input_event(input_res.unwrap().unwrap())
                     }
                 }
             };
+            if should_quit {
+                return Ok(());
+            }
 
-            terminal.draw(|f| self.ui(f))?;
+            if should_draw {
+                terminal.draw(|f| self.ui(f))?;
+            }
+        }
+    }
+
+    fn try_recv_input_event(&mut self) -> Option<Event> {
+        if let Some(event) = self.pending_input_event.take() {
+            return Some(event);
+        }
+
+        loop {
+            match self.input_receiver.try_recv() {
+                Ok(Ok(event)) => return Some(event),
+                Ok(Err(_)) => continue,
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => return None,
+            }
+        }
+    }
+
+    fn handle_input_event(&mut self, event: Event) -> (bool, bool) {
+        match event {
+            Event::Key(key) => {
+                if key.code == KeyCode::Char('q') {
+                    return (true, false);
+                }
+                self.handle(AppMessage::Key(key));
+                (false, true)
+            }
+            Event::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if self.dialog.is_some() {
+                        return (false, false);
+                    }
+                    if let Some(index) = self.job_index_at(mouse.column, mouse.row) {
+                        if self.job_list_state.selected() != Some(index) {
+                            self.handle(AppMessage::MouseClick(index));
+                            return (false, true);
+                        }
+                    }
+                    (false, false)
+                }
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                    if self.dialog.is_some() {
+                        return (false, false);
+                    }
+                    let Some(target) = self.mouse_scroll_target(mouse.column, mouse.row) else {
+                        return (false, false);
+                    };
+                    let direction = mouse_wheel_direction(mouse.kind).unwrap();
+                    let mut amount = 1u16;
+                    while let Some(next_event) = self.try_recv_input_event() {
+                        let should_merge = if let Event::Mouse(next_mouse) = &next_event {
+                            mouse_wheel_direction(next_mouse.kind) == Some(direction)
+                                && self.mouse_scroll_target(next_mouse.column, next_mouse.row)
+                                    == Some(target)
+                        } else {
+                            false
+                        };
+                        if should_merge {
+                            amount = amount.saturating_add(1);
+                        } else {
+                            self.pending_input_event = Some(next_event);
+                            break;
+                        }
+                    }
+                    self.handle(AppMessage::MouseWheel {
+                        target,
+                        direction,
+                        amount,
+                    });
+                    (false, true)
+                }
+                _ => (false, false),
+            },
+            Event::Resize(_, _) => (false, true),
+            _ => (false, false),
+        }
+    }
+
+    fn mouse_scroll_target(&self, column: u16, row: u16) -> Option<MouseScrollTarget> {
+        if rect_contains(self.job_list_area, column, row) {
+            Some(MouseScrollTarget::Jobs)
+        } else if rect_contains(self.job_output_area, column, row) {
+            Some(MouseScrollTarget::Output)
+        } else {
+            None
         }
     }
 
@@ -244,16 +356,7 @@ impl App {
                             } else {
                                 1
                             };
-                            match self.job_output_anchor {
-                                ScrollAnchor::Top => {
-                                    self.job_output_offset =
-                                        self.job_output_offset.saturating_add(delta)
-                                }
-                                ScrollAnchor::Bottom => {
-                                    self.job_output_offset =
-                                        self.job_output_offset.saturating_sub(delta)
-                                }
-                            }
+                            self.scroll_job_output_down_by(delta);
                         }
                         KeyCode::PageUp => {
                             let delta = if key.modifiers.intersects(
@@ -265,16 +368,7 @@ impl App {
                             } else {
                                 1
                             };
-                            match self.job_output_anchor {
-                                ScrollAnchor::Top => {
-                                    self.job_output_offset =
-                                        self.job_output_offset.saturating_sub(delta)
-                                }
-                                ScrollAnchor::Bottom => {
-                                    self.job_output_offset =
-                                        self.job_output_offset.saturating_add(delta)
-                                }
-                            }
+                            self.scroll_job_output_up_by(delta);
                         }
                         KeyCode::Home => {
                             self.job_output_offset = 0;
@@ -304,6 +398,29 @@ impl App {
                         }
                         _ => {}
                     };
+                }
+            }
+            AppMessage::MouseClick(index) => {
+                if self.dialog.is_none() && index < self.jobs.len() {
+                    self.job_list_state.select(Some(index));
+                }
+            }
+            AppMessage::MouseWheel {
+                target,
+                direction,
+                amount,
+            } => {
+                if self.dialog.is_none() {
+                    match target {
+                        MouseScrollTarget::Jobs => match direction {
+                            MouseWheelDirection::Up => self.job_list_state.scroll_up_by(amount),
+                            MouseWheelDirection::Down => self.job_list_state.scroll_down_by(amount),
+                        },
+                        MouseScrollTarget::Output => match direction {
+                            MouseWheelDirection::Up => self.scroll_job_output_up_by(amount),
+                            MouseWheelDirection::Down => self.scroll_job_output_down_by(amount),
+                        },
+                    }
                 }
             }
         }
@@ -438,6 +555,7 @@ impl App {
             .highlight_style(Style::default().bg(Color::Green).fg(Color::Black));
         f.render_stateful_widget(job_list, master_detail[0], &mut self.job_list_state);
         self.job_list_height = master_detail[0].height.saturating_sub(2); // account for borders
+        self.job_list_area = master_detail[0];
 
         // Job details
 
@@ -515,6 +633,7 @@ impl App {
 
         // Log
         let log_area = job_detail_log[1];
+        self.job_output_area = log_area;
         let log_title = Line::from(vec![
             Span::raw("─"),
             Span::raw(match self.output_file_view {
@@ -628,51 +747,6 @@ fn chunked_string(s: &str, first_chunk_size: usize, chunk_size: usize) -> Vec<&s
     iter.chain(once(&s[last_index..])).collect()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_chunked_string() {
-        // Divisible
-        let input = "abcdefghij";
-        let expected = vec!["abcd", "ef", "gh", "ij"];
-        assert_eq!(chunked_string(input, 4, 2), expected);
-
-        // Not divisible
-        let input = "123456789";
-        let expected = vec!["1234", "56", "78", "9"];
-        assert_eq!(chunked_string(input, 4, 2), expected);
-
-        // Smaller
-        let input = "abc";
-        let expected = vec!["abc"];
-        assert_eq!(chunked_string(input, 4, 2), expected);
-
-        // Smaller
-        let input = "abcde";
-        let expected = vec!["abcd", "e"];
-        assert_eq!(chunked_string(input, 4, 2), expected);
-
-        // Empty
-        let input = "";
-        let expected: Vec<&str> = vec![""];
-        assert_eq!(chunked_string(input, 4, 2), expected);
-
-        let input = "123456789";
-        let expected = vec!["1234", "56789"];
-        assert_eq!(chunked_string(input, 4, 0), expected);
-
-        let input = "123456789";
-        let expected = vec!["12", "34", "56", "78", "9"];
-        assert_eq!(chunked_string(input, 0, 2), expected);
-
-        let input = "123456789";
-        let expected = vec!["123456789"];
-        assert_eq!(chunked_string(input, 0, 0), expected);
-    }
-}
-
 fn fit_text(
     s: &'_ str,
     lines: usize,
@@ -778,5 +852,106 @@ impl App {
 
     fn scroll_jobs_half_page_up(&mut self) {
         self.job_list_state.scroll_up_by(self.job_list_height / 2);
+    }
+
+    fn job_index_at(&self, column: u16, row: u16) -> Option<usize> {
+        if self.jobs.is_empty() {
+            return None;
+        }
+        let inner = Rect::new(
+            self.job_list_area.x.saturating_add(1),
+            self.job_list_area.y.saturating_add(1),
+            self.job_list_area.width.saturating_sub(2),
+            self.job_list_area.height.saturating_sub(2),
+        );
+        if !rect_contains(inner, column, row) {
+            return None;
+        }
+
+        let row_in_list = (row - inner.y) as usize;
+        let index = self.job_list_state.offset().saturating_add(row_in_list);
+        (index < self.jobs.len()).then_some(index)
+    }
+
+    fn scroll_job_output_down_by(&mut self, delta: u16) {
+        match self.job_output_anchor {
+            ScrollAnchor::Top => {
+                self.job_output_offset = self.job_output_offset.saturating_add(delta)
+            }
+            ScrollAnchor::Bottom => {
+                self.job_output_offset = self.job_output_offset.saturating_sub(delta)
+            }
+        }
+    }
+
+    fn scroll_job_output_up_by(&mut self, delta: u16) {
+        match self.job_output_anchor {
+            ScrollAnchor::Top => {
+                self.job_output_offset = self.job_output_offset.saturating_sub(delta)
+            }
+            ScrollAnchor::Bottom => {
+                self.job_output_offset = self.job_output_offset.saturating_add(delta)
+            }
+        }
+    }
+}
+
+fn rect_contains(rect: Rect, column: u16, row: u16) -> bool {
+    column >= rect.x
+        && column < rect.x.saturating_add(rect.width)
+        && row >= rect.y
+        && row < rect.y.saturating_add(rect.height)
+}
+
+fn mouse_wheel_direction(kind: MouseEventKind) -> Option<MouseWheelDirection> {
+    match kind {
+        MouseEventKind::ScrollUp => Some(MouseWheelDirection::Up),
+        MouseEventKind::ScrollDown => Some(MouseWheelDirection::Down),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_chunked_string() {
+        // Divisible
+        let input = "abcdefghij";
+        let expected = vec!["abcd", "ef", "gh", "ij"];
+        assert_eq!(chunked_string(input, 4, 2), expected);
+
+        // Not divisible
+        let input = "123456789";
+        let expected = vec!["1234", "56", "78", "9"];
+        assert_eq!(chunked_string(input, 4, 2), expected);
+
+        // Smaller
+        let input = "abc";
+        let expected = vec!["abc"];
+        assert_eq!(chunked_string(input, 4, 2), expected);
+
+        // Smaller
+        let input = "abcde";
+        let expected = vec!["abcd", "e"];
+        assert_eq!(chunked_string(input, 4, 2), expected);
+
+        // Empty
+        let input = "";
+        let expected: Vec<&str> = vec![""];
+        assert_eq!(chunked_string(input, 4, 2), expected);
+
+        let input = "123456789";
+        let expected = vec!["1234", "56789"];
+        assert_eq!(chunked_string(input, 4, 0), expected);
+
+        let input = "123456789";
+        let expected = vec!["12", "34", "56", "78", "9"];
+        assert_eq!(chunked_string(input, 0, 2), expected);
+
+        let input = "123456789";
+        let expected = vec!["123456789"];
+        assert_eq!(chunked_string(input, 0, 0), expected);
     }
 }
