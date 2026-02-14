@@ -1514,7 +1514,7 @@ checksum = "8b36ee98fd31ec7426d599183e8fe26932a8dc1fb76ddb6214d05493377d34ca"
 
 [[package]]
 name = "turm"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "clap",
  "clap_complete",
