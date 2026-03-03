@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.1](https://github.com/karimknaebel/turm/compare/v0.13.0...v0.13.1) (2026-03-03)
+
+
+### Bug Fixes
+
+* use bracketed paste mode to prevent accidental inputs ([19967cb](https://github.com/karimknaebel/turm/commit/19967cb2fcfedf8197ed94f86f815db1557818b5))
+
 ## [0.13.0](https://github.com/karimknaebel/turm/compare/v0.12.0...v0.13.0) (2026-02-14)
 
 
