@@ -1,7 +1,7 @@
 [package]
 name = "turm"
 version = "0.13.1"
-authors = ["Karim Abou Zeid <contact@ka.codes>"]
+authors = ["Karim Knaebel <contact@knaebel.dev>"]
 description = "A TUI for the Slurm Workload Manager."
 repository = "https://github.com/karimknaebel/turm"
 license = "MIT"
