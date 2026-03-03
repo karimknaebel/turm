@@ -304,7 +304,7 @@ impl App {
                                     .expect("failed to execute scancel");
                                 self.dialog = None;
                             }
-                            KeyCode::Esc => {
+                            KeyCode::Esc | KeyCode::Char('n') => {
                                 self.dialog = None;
                             }
                             _ => {}
@@ -379,12 +379,14 @@ impl App {
                             self.job_output_anchor = ScrollAnchor::Bottom;
                         }
                         KeyCode::Char('c') => {
-                            if let Some(id) = self
-                                .job_list_state
-                                .selected()
-                                .and_then(|i| self.jobs.get(i).map(|j| j.id()))
-                            {
-                                self.dialog = Some(Dialog::ConfirmCancelJob(id));
+                            if key.modifiers.is_empty() {
+                                if let Some(id) = self
+                                    .job_list_state
+                                    .selected()
+                                    .and_then(|i| self.jobs.get(i).map(|j| j.id()))
+                                {
+                                    self.dialog = Some(Dialog::ConfirmCancelJob(id));
+                                }
                             }
                         }
                         KeyCode::Char('o') => {
