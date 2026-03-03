@@ -11,7 +11,10 @@ use clap_complete::{Shell, generate};
 use crossbeam::channel::{Sender, unbounded};
 use crossterm::{
     cursor::Show,
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event},
+    event::{
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -75,6 +78,7 @@ fn install_panic_hook() {
         let _ = execute!(
             io::stdout(),
             LeaveAlternateScreen,
+            DisableBracketedPaste,
             DisableMouseCapture,
             Show
         );
@@ -89,7 +93,12 @@ struct TerminalGuard<W: Write> {
 impl<W: Write> TerminalGuard<W> {
     fn new(mut writer: W) -> io::Result<Self> {
         enable_raw_mode()?;
-        execute!(writer, EnterAlternateScreen, EnableMouseCapture)?;
+        execute!(
+            writer,
+            EnterAlternateScreen,
+            EnableBracketedPaste,
+            EnableMouseCapture
+        )?;
         let backend = CrosstermBackend::new(writer);
         let terminal = Terminal::new(backend)?;
         Ok(Self { terminal })
@@ -106,6 +115,7 @@ impl<W: Write> Drop for TerminalGuard<W> {
         let _ = execute!(
             self.terminal.backend_mut(),
             LeaveAlternateScreen,
+            DisableBracketedPaste,
             DisableMouseCapture
         );
         let _ = self.terminal.show_cursor();

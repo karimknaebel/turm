@@ -206,6 +206,7 @@ impl App {
                 self.handle(AppMessage::Key(key));
                 (false, true)
             }
+            Event::Paste(_) => (false, false),
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
                     if self.dialog.is_some() {
