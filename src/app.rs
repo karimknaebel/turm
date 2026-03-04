@@ -26,6 +26,7 @@ pub enum Focus {
 
 pub enum Dialog {
     ConfirmCancelJob(String),
+    SelectCancelSignal { id: String, selected_signal: usize },
 }
 
 #[derive(Clone, Copy)]
@@ -113,6 +114,9 @@ pub(crate) enum MouseScrollTarget {
     Jobs,
     Output,
 }
+
+const SCANCEL_SIGNALS: &[&str] = &["TERM", "INT", "HUP", "USR1", "USR2", "STOP", "CONT", "KILL"];
+const DIALOG_WIDTH: u16 = 80;
 
 impl App {
     pub fn new(
@@ -292,25 +296,59 @@ impl App {
             }
             AppMessage::JobOutput(content) => self.job_output = content,
             AppMessage::Key(key) => {
-                if let Some(dialog) = &self.dialog {
-                    match dialog {
+                if self.dialog.is_some() {
+                    let mut close_dialog = false;
+                    let mut scancel_request = None;
+
+                    match self.dialog.as_mut().expect("dialog must exist") {
                         Dialog::ConfirmCancelJob(id) => match key.code {
                             KeyCode::Enter | KeyCode::Char('y') => {
-                                let id = id.clone();
-                                Command::new("scancel")
-                                    .arg(id)
-                                    .stdout(Stdio::null())
-                                    .stderr(Stdio::null())
-                                    .status()
-                                    .expect("failed to execute scancel");
-                                self.dialog = None;
+                                scancel_request = Some((id.clone(), None));
+                                close_dialog = true;
                             }
                             KeyCode::Esc => {
-                                self.dialog = None;
+                                close_dialog = true;
+                            }
+                            _ => {}
+                        },
+                        Dialog::SelectCancelSignal {
+                            id,
+                            selected_signal,
+                        } => match key.code {
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                *selected_signal = selected_signal.saturating_sub(1);
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                *selected_signal = min(
+                                    selected_signal.saturating_add(1),
+                                    SCANCEL_SIGNALS.len().saturating_sub(1),
+                                );
+                            }
+                            KeyCode::Enter => {
+                                scancel_request =
+                                    Some((id.clone(), Some(SCANCEL_SIGNALS[*selected_signal])));
+                                close_dialog = true;
+                            }
+                            KeyCode::Esc => {
+                                close_dialog = true;
+                            }
+                            KeyCode::Char(c) if c.is_ascii_digit() => {
+                                if let Some(index) = signal_index_for_digit(c) {
+                                    if index < SCANCEL_SIGNALS.len() {
+                                        *selected_signal = index;
+                                    }
+                                }
                             }
                             _ => {}
                         },
                     };
+
+                    if let Some((id, signal)) = scancel_request {
+                        execute_scancel(&id, signal);
+                    }
+                    if close_dialog {
+                        self.dialog = None;
+                    }
                 } else {
                     match key.code {
                         KeyCode::Char('h') | KeyCode::Left => self.focus_previous_panel(),
@@ -380,12 +418,16 @@ impl App {
                             self.job_output_anchor = ScrollAnchor::Bottom;
                         }
                         KeyCode::Char('c') => {
-                            if let Some(id) = self
-                                .job_list_state
-                                .selected()
-                                .and_then(|i| self.jobs.get(i).map(|j| j.id()))
-                            {
+                            if let Some(id) = self.selected_job_id() {
                                 self.dialog = Some(Dialog::ConfirmCancelJob(id));
+                            }
+                        }
+                        KeyCode::Char('C') => {
+                            if let Some(id) = self.selected_job_id() {
+                                self.dialog = Some(Dialog::SelectCancelSignal {
+                                    id,
+                                    selected_signal: 0,
+                                });
                             }
                         }
                         KeyCode::Char('o') => {
@@ -462,7 +504,7 @@ impl App {
             ("home/end", "top/bottom"),
             ("esc", "cancel"),
             ("enter", "confirm"),
-            ("c", "cancel job"),
+            ("c/C", "cancel/signal"),
             ("o", "toggle stdout/stderr"),
             ("w", "toggle text wrap"),
         ];
@@ -684,21 +726,13 @@ impl App {
         f.render_widget(log, log_area);
 
         if let Some(dialog) = &self.dialog {
-            fn centered_lines(percent_x: u16, lines: u16, r: Rect) -> Rect {
-                let dy = r.height.saturating_sub(lines) / 2;
-                let r = Rect::new(r.x, r.y + dy, r.width, min(lines, r.height - dy));
+            fn centered_dialog_area(width: u16, lines: u16, viewport: Rect) -> Rect {
+                let dialog_width = min(width, viewport.width);
+                let dialog_height = min(lines, viewport.height);
+                let dialog_x = viewport.x + viewport.width.saturating_sub(dialog_width) / 2;
+                let dialog_y = viewport.y + viewport.height.saturating_sub(dialog_height) / 2;
 
-                Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints(
-                        [
-                            Constraint::Percentage((100 - percent_x) / 2),
-                            Constraint::Percentage(percent_x),
-                            Constraint::Percentage((100 - percent_x) / 2),
-                        ]
-                        .as_ref(),
-                    )
-                    .split(r)[1]
+                Rect::new(dialog_x, dialog_y, dialog_width, dialog_height)
             }
 
             match dialog {
@@ -718,7 +752,51 @@ impl App {
                             .style(Style::default().fg(Color::Green)),
                     );
 
-                    let area = centered_lines(75, 3, f.area());
+                    let area = centered_dialog_area(DIALOG_WIDTH, 3, f.area());
+                    f.render_widget(Clear, area);
+                    f.render_widget(dialog, area);
+                }
+                Dialog::SelectCancelSignal {
+                    id,
+                    selected_signal,
+                } => {
+                    let mut rows = vec![
+                        Line::from(vec![
+                            Span::raw("Cancel job "),
+                            Span::styled(id, Style::default().add_modifier(Modifier::BOLD)),
+                            Span::raw(" with signal:"),
+                        ]),
+                        Line::default(),
+                    ];
+                    rows.extend(SCANCEL_SIGNALS.iter().enumerate().map(|(i, signal)| {
+                        let signal_style = if i == *selected_signal {
+                            Style::default().fg(Color::Black).bg(Color::Green)
+                        } else {
+                            Style::default()
+                        };
+                        let shortcut_style = signal_style.add_modifier(Modifier::DIM);
+                        Line::from(vec![
+                            Span::styled(format!("[{}] ", i + 1), shortcut_style),
+                            Span::styled(*signal, signal_style),
+                        ])
+                    }));
+
+                    let dialog = Paragraph::new(Text::from(rows))
+                        .style(Style::default().fg(Color::White))
+                        .wrap(Wrap { trim: true })
+                        .block(
+                            Block::default()
+                                .title("─Signal")
+                                .borders(Borders::ALL)
+                                .border_type(BorderType::Rounded)
+                                .style(Style::default().fg(Color::Green)),
+                        );
+
+                    let area = centered_dialog_area(
+                        DIALOG_WIDTH,
+                        SCANCEL_SIGNALS.len() as u16 + 4,
+                        f.area(),
+                    );
                     f.render_widget(Clear, area);
                     f.render_widget(dialog, area);
                 }
@@ -819,6 +897,12 @@ fn fit_text(
 }
 
 impl App {
+    fn selected_job_id(&self) -> Option<String> {
+        self.job_list_state
+            .selected()
+            .and_then(|i| self.jobs.get(i).map(|j| j.id()))
+    }
+
     fn focus_next_panel(&mut self) {
         match self.focus {
             Focus::Jobs => self.focus = Focus::Jobs,
@@ -910,6 +994,25 @@ fn mouse_wheel_direction(kind: MouseEventKind) -> Option<MouseWheelDirection> {
         MouseEventKind::ScrollDown => Some(MouseWheelDirection::Down),
         _ => None,
     }
+}
+
+fn signal_index_for_digit(digit: char) -> Option<usize> {
+    let value = digit.to_digit(10)? as usize;
+    if value == 0 { None } else { Some(value - 1) }
+}
+
+fn execute_scancel(job_id: &str, signal: Option<&str>) {
+    let mut command = Command::new("scancel");
+    if let Some(signal) = signal {
+        command.arg("--signal").arg(signal);
+    }
+
+    command
+        .arg(job_id)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("failed to execute scancel");
 }
 
 #[cfg(test)]
