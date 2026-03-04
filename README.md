@@ -69,7 +69,7 @@ The reason for this is that `squeue` is available on all Slurm clusters, and run
 In contrast, Slurm's C API is unstable, and Slurm's REST API is not always available and can be costly for the Slurm controller.
 Another advantage is that we get free support for the exact same CLI flags as `squeue`, which users are already familiar with, for filtering and sorting the jobs.
 
-### Ressource usage
+### Resource usage
 
 TL;DR: `turm` ≈ `watch -n2 squeue` + `tail -f slurm-log.out`
 
