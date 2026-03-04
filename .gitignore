@@ -1,1 +1,3 @@
 /target
+scripts/mock-slurm/logs/*
+!scripts/mock-slurm/logs/.gitkeep
