@@ -84,8 +84,7 @@ However, since inotify notifications are not supported for remote file systems, 
 For local UI testing, this repository includes a mock `squeue` and `scancel`:
 
 ```shell
-direnv allow
-cargo run -- --me
+PATH=scripts/mock-slurm/bin:$PATH cargo run -- --me
 ```
 
 The `.envrc` prepends `scripts/mock-slurm/bin` to `PATH`.
