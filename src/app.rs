@@ -820,7 +820,7 @@ impl App {
                         };
                         let shortcut_style = signal_style.add_modifier(Modifier::DIM);
                         Line::from(vec![
-                            Span::styled(format!("[{}] ", i + 1), shortcut_style),
+                            Span::styled(format!("{}. ", i + 1), shortcut_style),
                             Span::styled(*signal, signal_style),
                         ])
                     }));
