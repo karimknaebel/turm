@@ -32,6 +32,7 @@ impl JobWatcher {
             "state",
             "username",
             "timeused",
+            "timelimit",
             "StartTime",
             "tres-alloc",
             "partition",
@@ -74,20 +75,21 @@ impl JobWatcher {
                     let state = parts[2];
                     let user = parts[3];
                     let time = parts[4];
-                    let start_time = parts[5];
-                    let tres = parts[6];
-                    let partition = parts[7];
-                    let nodelist = parts[8];
-                    let stdout = parts[9];
-                    let stderr = parts[10];
-                    let command = parts[11];
-                    let state_compact = parts[12];
-                    let reason = parts[13];
+                    let time_limit = parts[5];
+                    let start_time = parts[6];
+                    let tres = parts[7];
+                    let partition = parts[8];
+                    let nodelist = parts[9];
+                    let stdout = parts[10];
+                    let stderr = parts[11];
+                    let command = parts[12];
+                    let state_compact = parts[13];
+                    let reason = parts[14];
 
-                    let array_job_id = parts[14];
-                    let array_task_id = parts[15];
-                    let node_list = parts[16];
-                    let working_dir = parts[17];
+                    let array_job_id = parts[15];
+                    let array_task_id = parts[16];
+                    let node_list = parts[17];
+                    let working_dir = parts[18];
 
                     Some(Job {
                         job_id: id.to_owned(),
@@ -106,6 +108,7 @@ impl JobWatcher {
                         },
                         user: user.to_owned(),
                         time: time.to_owned(),
+                        time_limit: time_limit.to_owned(),
                         start_time: start_time.to_owned(),
                         tres: tres.to_owned(),
                         partition: partition.to_owned(),

@@ -19,6 +19,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 use std::io;
+use tui_input::{Input, backend::crossterm::EventHandler};
 
 pub enum Focus {
     Jobs,
@@ -27,6 +28,7 @@ pub enum Focus {
 pub enum Dialog {
     ConfirmCancelJob(String),
     SelectCancelSignal { id: String, selected_signal: usize },
+    EditTimeLimit { id: String, input: Input },
 }
 
 #[derive(Clone, Copy)]
@@ -73,6 +75,7 @@ pub struct Job {
     pub reason: Option<String>,
     pub user: String,
     pub time: String,
+    pub time_limit: String,
     pub start_time: String,
     pub tres: String,
     pub partition: String,
@@ -299,6 +302,7 @@ impl App {
                 if self.dialog.is_some() {
                     let mut close_dialog = false;
                     let mut scancel_request = None;
+                    let mut timelimit_request = None;
 
                     match self.dialog.as_mut().expect("dialog must exist") {
                         Dialog::ConfirmCancelJob(id) => match key.code {
@@ -341,10 +345,27 @@ impl App {
                             }
                             _ => {}
                         },
+                        Dialog::EditTimeLimit { id, input } => match key.code {
+                            KeyCode::Enter => {
+                                if let Some(time_limit) = validated_time_limit(input) {
+                                    timelimit_request = Some((id.clone(), time_limit));
+                                    close_dialog = true;
+                                }
+                            }
+                            KeyCode::Esc => {
+                                close_dialog = true;
+                            }
+                            _ => {
+                                input.handle_event(&Event::Key(key));
+                            }
+                        },
                     };
 
                     if let Some((id, signal)) = scancel_request {
                         execute_scancel(&id, signal);
+                    }
+                    if let Some((id, time_limit)) = timelimit_request {
+                        execute_scontrol_update_timelimit(&id, &time_limit);
                     }
                     if close_dialog {
                         self.dialog = None;
@@ -430,6 +451,14 @@ impl App {
                                 });
                             }
                         }
+                        KeyCode::Char('t') => {
+                            if let Some(job) = self.selected_job() {
+                                self.dialog = Some(Dialog::EditTimeLimit {
+                                    id: job.id(),
+                                    input: Input::new(job.time_limit.clone()),
+                                });
+                            }
+                        }
                         KeyCode::Char('o') => {
                             self.output_file_view = match self.output_file_view {
                                 OutputFileView::Stdout => OutputFileView::Stderr,
@@ -505,6 +534,7 @@ impl App {
             ("esc", "cancel"),
             ("enter", "confirm"),
             ("c/C", "cancel/signal"),
+            ("t", "set time limit"),
             ("o", "toggle stdout/stderr"),
             ("w", "toggle text wrap"),
         ];
@@ -746,7 +776,7 @@ impl App {
                     .wrap(Wrap { trim: true })
                     .block(
                         Block::default()
-                            .title("─Confirm")
+                            .title("─Cancel")
                             .borders(Borders::ALL)
                             .border_type(BorderType::Rounded)
                             .style(Style::default().fg(Color::Green)),
@@ -762,9 +792,9 @@ impl App {
                 } => {
                     let mut rows = vec![
                         Line::from(vec![
-                            Span::raw("Cancel job "),
+                            Span::raw("Send signal to job "),
                             Span::styled(id, Style::default().add_modifier(Modifier::BOLD)),
-                            Span::raw(" with signal:"),
+                            Span::raw(":"),
                         ]),
                         Line::default(),
                     ];
@@ -799,6 +829,50 @@ impl App {
                     );
                     f.render_widget(Clear, area);
                     f.render_widget(dialog, area);
+                }
+                Dialog::EditTimeLimit { id, input } => {
+                    let block = Block::default()
+                        .title("─Time Limit")
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .style(Style::default().fg(Color::Green));
+
+                    let area = centered_dialog_area(DIALOG_WIDTH, 3, f.area());
+                    let inner = block.inner(area);
+                    let prompt_prefix = "Set time limit for job ";
+                    let prompt_suffix = ": ";
+                    let prompt_width = (prompt_prefix.chars().count()
+                        + id.chars().count()
+                        + prompt_suffix.chars().count())
+                        as u16;
+                    let available_width = inner.width.saturating_sub(prompt_width).max(1) as usize;
+                    let scroll = input.visual_scroll(available_width);
+                    let visible_value = input
+                        .value()
+                        .chars()
+                        .skip(scroll)
+                        .take(available_width)
+                        .collect::<String>();
+                    let dialog = Paragraph::new(Line::from(vec![
+                        Span::raw(prompt_prefix),
+                        Span::styled(id, Style::default().add_modifier(Modifier::BOLD)),
+                        Span::raw(prompt_suffix),
+                        Span::styled(visible_value, Style::default().fg(Color::Blue)),
+                    ]))
+                    .style(Style::default().fg(Color::White))
+                    .block(block);
+
+                    f.render_widget(Clear, area);
+                    f.render_widget(dialog, area);
+
+                    let cursor_offset = input.visual_cursor().saturating_sub(scroll) as u16;
+                    let cursor_x = inner
+                        .x
+                        .saturating_add(prompt_width)
+                        .saturating_add(cursor_offset)
+                        .min(inner.x.saturating_add(inner.width.saturating_sub(1)));
+                    let cursor_y = inner.y;
+                    f.set_cursor_position((cursor_x, cursor_y));
                 }
             }
         }
@@ -897,10 +971,14 @@ fn fit_text(
 }
 
 impl App {
-    fn selected_job_id(&self) -> Option<String> {
+    fn selected_job(&self) -> Option<&Job> {
         self.job_list_state
             .selected()
-            .and_then(|i| self.jobs.get(i).map(|j| j.id()))
+            .and_then(|i| self.jobs.get(i))
+    }
+
+    fn selected_job_id(&self) -> Option<String> {
+        self.selected_job().map(Job::id)
     }
 
     fn focus_next_panel(&mut self) {
@@ -1001,6 +1079,15 @@ fn signal_index_for_digit(digit: char) -> Option<usize> {
     if value == 0 { None } else { Some(value - 1) }
 }
 
+fn validated_time_limit(input: &Input) -> Option<String> {
+    let time_limit = input.value().trim();
+    if time_limit.is_empty() {
+        None
+    } else {
+        Some(time_limit.to_string())
+    }
+}
+
 fn execute_scancel(job_id: &str, signal: Option<&str>) {
     let mut command = Command::new("scancel");
     if let Some(signal) = signal {
@@ -1013,6 +1100,17 @@ fn execute_scancel(job_id: &str, signal: Option<&str>) {
         .stderr(Stdio::null())
         .status()
         .expect("failed to execute scancel");
+}
+
+fn execute_scontrol_update_timelimit(job_id: &str, time_limit: &str) {
+    Command::new("scontrol")
+        .arg("update")
+        .arg(format!("JobId={job_id}"))
+        .arg(format!("TimeLimit={time_limit}"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("failed to execute scontrol");
 }
 
 #[cfg(test)]
@@ -1057,5 +1155,15 @@ mod tests {
         let input = "123456789";
         let expected = vec!["123456789"];
         assert_eq!(chunked_string(input, 0, 0), expected);
+    }
+
+    #[test]
+    fn test_validated_time_limit() {
+        assert_eq!(validated_time_limit(&Input::new("".to_string())), None);
+        assert_eq!(validated_time_limit(&Input::new("   ".to_string())), None);
+        assert_eq!(
+            validated_time_limit(&Input::new(" 01:00:00 ".to_string())),
+            Some("01:00:00".to_string())
+        );
     }
 }

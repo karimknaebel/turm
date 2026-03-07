@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+root_dir="$(cd -- "$script_dir/../../.." && pwd)"
+log_dir="$root_dir/scripts/mock-slurm/logs"
+log_file="$log_dir/scontrol.log"
+
+mkdir -p "$log_dir"
+
+timestamp="$(date '+%Y-%m-%d %H:%M:%S')"
+job_id=""
+time_limit=""
+
+if [[ "${1:-}" == "update" ]]; then
+    shift
+fi
+
+for arg in "$@"; do
+    case "$arg" in
+    JobId=*)
+        job_id="${arg#JobId=}"
+        ;;
+    TimeLimit=*)
+        time_limit="${arg#TimeLimit=}"
+        ;;
+    esac
+done
+
+if [[ -n "$job_id" && -n "$time_limit" ]]; then
+    printf '[%s] updated %s TimeLimit=%s\n' "$timestamp" "$job_id" "$time_limit" >>"$log_file"
+    exit 0
+fi
+
+printf '[%s] invalid scontrol call: %s\n' "$timestamp" "$*" >>"$log_file"
+exit 1

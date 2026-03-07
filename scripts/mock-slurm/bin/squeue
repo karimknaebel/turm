@@ -27,5 +27,5 @@ fi
 sep='###turm###'
 
 printf '%s\n' \
-"1001${sep}train-model${sep}RUNNING${sep}${USER:-mock}${sep}00:12:37${sep}N/A${sep}cpu=4,mem=8G${sep}debug${sep}mac-mini-01${sep}${stdout_running}${sep}${stderr_running}${sep}python train.py --epochs 50${sep}R${sep}None${sep}1001${sep}N/A${sep}mac-mini-01${sep}${root_dir}${sep}" \
-"1002${sep}eval-suite${sep}PENDING${sep}${USER:-mock}${sep}0:00${sep}2026-03-04T12:00:00${sep}cpu=2,mem=4G${sep}debug${sep}(null)${sep}${stdout_pending}${sep}${stderr_pending}${sep}python eval.py --dataset validation${sep}PD${sep}Resources${sep}1002${sep}N/A${sep}(null)${sep}${root_dir}${sep}"
+"1001${sep}train-model${sep}RUNNING${sep}${USER:-mock}${sep}00:12:37${sep}01:00:00${sep}N/A${sep}cpu=4,mem=8G${sep}debug${sep}mac-mini-01${sep}${stdout_running}${sep}${stderr_running}${sep}python train.py --epochs 50${sep}R${sep}None${sep}1001${sep}N/A${sep}mac-mini-01${sep}${root_dir}${sep}" \
+"1002${sep}eval-suite${sep}PENDING${sep}${USER:-mock}${sep}0:00${sep}00:30:00${sep}2026-03-04T12:00:00${sep}cpu=2,mem=4G${sep}debug${sep}(null)${sep}${stdout_pending}${sep}${stderr_pending}${sep}python eval.py --dataset validation${sep}PD${sep}Resources${sep}1002${sep}N/A${sep}(null)${sep}${root_dir}${sep}"

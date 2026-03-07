@@ -81,14 +81,13 @@ However, since inotify notifications are not supported for remote file systems, 
 
 ## Development without Slurm
 
-For local UI testing, this repository includes a mock `squeue` and `scancel`:
+For local UI testing, this repository includes mocks for `squeue`, `scancel`, and `scontrol`:
 
 ```shell
 PATH=scripts/mock-slurm/bin:$PATH cargo run -- --me
 ```
 
-The `.envrc` prepends `scripts/mock-slurm/bin` to `PATH`.
-The mock `squeue` reads/writes files in `scripts/mock-slurm/logs`, so you can test log rendering and refresh behavior without a Slurm install.
+The mock commands read/write files in `scripts/mock-slurm/logs`, so you can test log rendering and control actions without a Slurm install.
 
 ## Star History
 
