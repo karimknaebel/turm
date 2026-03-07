@@ -1,6 +1,6 @@
 [package]
 name = "turm"
-version = "0.13.1"
+version = "0.14.0"
 authors = ["Karim Knaebel <contact@knaebel.dev>"]
 description = "A TUI for the Slurm Workload Manager."
 repository = "https://github.com/karimknaebel/turm"

@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.14.0](https://github.com/karimknaebel/turm/compare/v0.13.1...v0.14.0) (2026-03-07)
+
+
+### Features
+
+* add edit time limit dialog ([e376f89](https://github.com/karimknaebel/turm/commit/e376f89014a47d8362a4a6ad15a38cecaaa029ef))
+* add signal picker for cancel action ([9562037](https://github.com/karimknaebel/turm/commit/9562037b72749a4c753de41d6d4dc0c1e49f52d9))
+* change signal list style ([cd7fa24](https://github.com/karimknaebel/turm/commit/cd7fa241752a02016648dad1c58daf854cdd930f))
+* show command errors in dialog (scancel, scontrol, ...) ([de4aed5](https://github.com/karimknaebel/turm/commit/de4aed57ddc0042faea4d9ecdddc8a9bc050e45c))
+
 ## [0.13.1](https://github.com/karimknaebel/turm/compare/v0.13.0...v0.13.1) (2026-03-03)
 
 
