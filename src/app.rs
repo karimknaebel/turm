@@ -3,8 +3,7 @@ use crossbeam::{
     select,
 };
 use itertools::Either;
-use std::{cmp::min, iter::once, path::PathBuf, process::Command};
-use std::{process::Stdio, time::Duration};
+use std::{cmp::min, iter::once, path::PathBuf, process::Command, time::Duration};
 
 use crate::file_watcher::{FileWatcherError, FileWatcherHandle};
 use crate::job_watcher::JobWatcherHandle;
@@ -29,6 +28,12 @@ pub enum Dialog {
     ConfirmCancelJob(String),
     SelectCancelSignal { id: String, selected_signal: usize },
     EditTimeLimit { id: String, input: Input },
+    CommandError { command: String, output: String },
+}
+
+struct CommandFailure {
+    command: String,
+    output: String,
 }
 
 #[derive(Clone, Copy)]
@@ -303,6 +308,7 @@ impl App {
                     let mut close_dialog = false;
                     let mut scancel_request = None;
                     let mut timelimit_request = None;
+                    let mut command_failure = None;
 
                     match self.dialog.as_mut().expect("dialog must exist") {
                         Dialog::ConfirmCancelJob(id) => match key.code {
@@ -359,15 +365,23 @@ impl App {
                                 input.handle_event(&Event::Key(key));
                             }
                         },
+                        Dialog::CommandError { .. } => match key.code {
+                            KeyCode::Enter | KeyCode::Esc => {
+                                close_dialog = true;
+                            }
+                            _ => {}
+                        },
                     };
 
                     if let Some((id, signal)) = scancel_request {
-                        execute_scancel(&id, signal);
+                        command_failure = execute_scancel(&id, signal).err();
                     }
                     if let Some((id, time_limit)) = timelimit_request {
-                        execute_scontrol_update_timelimit(&id, &time_limit);
+                        command_failure = execute_scontrol_update_timelimit(&id, &time_limit).err();
                     }
-                    if close_dialog {
+                    if let Some(CommandFailure { command, output }) = command_failure {
+                        self.dialog = Some(Dialog::CommandError { command, output });
+                    } else if close_dialog {
                         self.dialog = None;
                     }
                 } else {
@@ -874,6 +888,28 @@ impl App {
                     let cursor_y = inner.y;
                     f.set_cursor_position((cursor_x, cursor_y));
                 }
+                Dialog::CommandError { command, output } => {
+                    let dialog_text = format!("Command: {command}\n\n{output}");
+                    let lines = dialog_text
+                        .lines()
+                        .count()
+                        .saturating_add(2)
+                        .min(u16::MAX as usize) as u16;
+                    let dialog = Paragraph::new(dialog_text)
+                        .style(Style::default().fg(Color::White))
+                        .wrap(Wrap { trim: false })
+                        .block(
+                            Block::default()
+                                .title("─Command Error")
+                                .borders(Borders::ALL)
+                                .border_type(BorderType::Rounded)
+                                .style(Style::default().fg(Color::Red)),
+                        );
+
+                    let area = centered_dialog_area(DIALOG_WIDTH, lines, f.area());
+                    f.render_widget(Clear, area);
+                    f.render_widget(dialog, area);
+                }
             }
         }
     }
@@ -1088,29 +1124,76 @@ fn validated_time_limit(input: &Input) -> Option<String> {
     }
 }
 
-fn execute_scancel(job_id: &str, signal: Option<&str>) {
+fn execute_scancel(job_id: &str, signal: Option<&str>) -> Result<(), CommandFailure> {
     let mut command = Command::new("scancel");
+    let mut command_display = String::from("scancel");
+
     if let Some(signal) = signal {
         command.arg("--signal").arg(signal);
+        command_display.push_str(&format!(" --signal {signal}"));
     }
+    command.arg(job_id);
+    command_display.push_str(&format!(" {job_id}"));
 
-    command
-        .arg(job_id)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .expect("failed to execute scancel");
+    execute_command(command, command_display)
 }
 
-fn execute_scontrol_update_timelimit(job_id: &str, time_limit: &str) {
-    Command::new("scontrol")
+fn execute_scontrol_update_timelimit(job_id: &str, time_limit: &str) -> Result<(), CommandFailure> {
+    let mut command = Command::new("scontrol");
+    command
         .arg("update")
         .arg(format!("JobId={job_id}"))
-        .arg(format!("TimeLimit={time_limit}"))
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .expect("failed to execute scontrol");
+        .arg(format!("TimeLimit={time_limit}"));
+
+    execute_command(
+        command,
+        format!("scontrol update JobId={job_id} TimeLimit={time_limit}"),
+    )
+}
+
+fn execute_command(mut command: Command, command_label: String) -> Result<(), CommandFailure> {
+    let output = command.output().map_err(|error| CommandFailure {
+        command: command_label.clone(),
+        output: error.to_string(),
+    })?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let mut details = vec![match output.status.code() {
+        Some(code) => format!("Exit code: {code}"),
+        None => "Exit code: N/A".to_string(),
+    }];
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = stdout.trim_end();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr.trim_end();
+    let has_stdout = !stdout.is_empty();
+    let has_stderr = !stderr.is_empty();
+    match (has_stdout, has_stderr) {
+        (true, true) => {
+            details.push(format!("stdout:\n{stdout}"));
+            details.push(format!("stderr:\n{stderr}"));
+        }
+        (true, false) => {
+            details.push(stdout.to_string());
+        }
+        (false, true) => {
+            details.push(stderr.to_string());
+        }
+        (false, false) => {}
+    }
+
+    if details.len() == 1 {
+        details.push("No output.".to_string());
+    }
+
+    Err(CommandFailure {
+        command: command_label,
+        output: details.join("\n\n"),
+    })
 }
 
 #[cfg(test)]
