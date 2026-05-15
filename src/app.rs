@@ -3,7 +3,13 @@ use crossbeam::{
     select,
 };
 use itertools::Either;
-use std::{cmp::min, iter::once, path::PathBuf, process::Command, time::Duration};
+use std::{
+    cmp::min,
+    iter::once,
+    path::{Path, PathBuf},
+    process::Command,
+    time::Duration,
+};
 
 use crate::file_watcher::{FileWatcherError, FileWatcherHandle};
 use crate::job_watcher::JobWatcherHandle;
@@ -168,6 +174,8 @@ impl App {
     pub fn run<B: Backend<Error = io::Error>>(
         &mut self,
         terminal: &mut Terminal<B>,
+        suspend: impl Fn() -> io::Result<()>,
+        resume: impl Fn() -> io::Result<()>,
     ) -> io::Result<()> {
         terminal.draw(|f| self.ui(f))?;
 
