@@ -23,7 +23,6 @@ use ratatui::{
     backend::{Backend, CrosstermBackend},
 };
 use squeue_args::SqueueArgs;
-use std::io::Write;
 use std::{io, panic, thread};
 
 #[derive(Parser)]
@@ -67,58 +66,61 @@ fn main() -> io::Result<()> {
 
     install_panic_hook();
 
-    let mut terminal_guard = TerminalGuard::new(io::stdout())?;
+    let mut terminal_guard = TerminalGuard::new()?;
     run_app(terminal_guard.terminal_mut(), args)
+}
+
+fn suspend_terminal() -> io::Result<()> {
+    disable_raw_mode()?;
+    execute!(
+        io::stdout(),
+        LeaveAlternateScreen,
+        DisableBracketedPaste,
+        DisableMouseCapture,
+        Show
+    )?;
+    Ok(())
+}
+
+fn resume_terminal() -> io::Result<()> {
+    enable_raw_mode()?;
+    execute!(
+        io::stdout(),
+        EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableMouseCapture
+    )?;
+    Ok(())
 }
 
 fn install_panic_hook() {
     let default_hook = panic::take_hook();
     panic::set_hook(Box::new(move |panic_info| {
-        let _ = disable_raw_mode();
-        let _ = execute!(
-            io::stdout(),
-            LeaveAlternateScreen,
-            DisableBracketedPaste,
-            DisableMouseCapture,
-            Show
-        );
+        let _ = suspend_terminal();
         default_hook(panic_info);
     }));
 }
 
-struct TerminalGuard<W: Write> {
-    terminal: Terminal<CrosstermBackend<W>>,
+struct TerminalGuard {
+    terminal: Terminal<CrosstermBackend<io::Stdout>>,
 }
 
-impl<W: Write> TerminalGuard<W> {
-    fn new(mut writer: W) -> io::Result<Self> {
-        enable_raw_mode()?;
-        execute!(
-            writer,
-            EnterAlternateScreen,
-            EnableBracketedPaste,
-            EnableMouseCapture
-        )?;
-        let backend = CrosstermBackend::new(writer);
+impl TerminalGuard {
+    fn new() -> io::Result<Self> {
+        resume_terminal()?;
+        let backend = CrosstermBackend::new(io::stdout());
         let terminal = Terminal::new(backend)?;
         Ok(Self { terminal })
     }
 
-    fn terminal_mut(&mut self) -> &mut Terminal<CrosstermBackend<W>> {
+    fn terminal_mut(&mut self) -> &mut Terminal<CrosstermBackend<io::Stdout>> {
         &mut self.terminal
     }
 }
 
-impl<W: Write> Drop for TerminalGuard<W> {
+impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = disable_raw_mode();
-        let _ = execute!(
-            self.terminal.backend_mut(),
-            LeaveAlternateScreen,
-            DisableBracketedPaste,
-            DisableMouseCapture
-        );
-        let _ = self.terminal.show_cursor();
+        let _ = suspend_terminal();
     }
 }
 
