@@ -64,19 +64,17 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Setup | Rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          override: true
-          profile: minimal
-          target: ${{ matrix.target }}
+          targets: ${{ matrix.target }}
+
+      - name: Setup | Cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
 
       - name: Build | Build
-        uses: actions-rs/cargo@v1
-        with:
-          command: build
-          args: --release --locked --target ${{ matrix.target }}
-          use-cross: ${{ matrix.os == 'ubuntu-latest' }}
+        run: cross build --release --locked --target ${{ matrix.target }}
 
       - name: Post Build | Prepare artifacts
         run: |
