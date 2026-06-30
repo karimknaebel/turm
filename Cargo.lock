@@ -1531,7 +1531,6 @@ dependencies = [
  "crossbeam",
  "crossterm",
  "itertools",
- "lazy_static",
  "notify",
  "ratatui",
  "regex",
