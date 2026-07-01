@@ -239,25 +239,25 @@ mod tests {
     #[test]
     fn parse_line_well_formed() {
         let line = make_line(&[
-            "12345",             // id
-            "my-job",           // name
-            "RUNNING",          // state
-            "alice",            // user
-            "1:00:00",          // time
-            "4:00:00",          // time_limit
+            "12345",               // id
+            "my-job",              // name
+            "RUNNING",             // state
+            "alice",               // user
+            "1:00:00",             // time
+            "4:00:00",             // time_limit
             "2024-01-01T00:00:00", // start_time
-            "cpu=4",            // tres
-            "gpu",              // partition
-            "node01",           // nodelist
-            "/scratch/12345.out", // stdout
-            "/scratch/12345.err", // stderr
-            "/home/alice/job.sh", // command
-            "R",                // state_compact
-            "None",             // reason
-            "12345",            // array_job_id
-            "N/A",              // array_task_id
-            "node01",           // node_list
-            "/home/alice",      // working_dir
+            "cpu=4",               // tres
+            "gpu",                 // partition
+            "node01",              // nodelist
+            "/scratch/12345.out",  // stdout
+            "/scratch/12345.err",  // stderr
+            "/home/alice/job.sh",  // command
+            "R",                   // state_compact
+            "None",                // reason
+            "12345",               // array_job_id
+            "N/A",                 // array_task_id
+            "node01",              // node_list
+            "/home/alice",         // working_dir
         ]);
 
         let job = JobWatcher::parse_line(&line).expect("should parse a well-formed line");
@@ -293,8 +293,8 @@ mod tests {
             "/home/bob/run.sh",
             "PD",
             "Priority",
-            "100",   // array_job_id
-            "3",     // array_task_id — not N/A
+            "100", // array_job_id
+            "3",   // array_task_id — not N/A
             "node02",
             "/home/bob",
         ]);
@@ -325,43 +325,113 @@ mod tests {
 
     #[test]
     fn resolve_path_percent_j_substitution() {
-        let result = JobWatcher::resolve_path("/out/%j.log", "100", "N/A", "42", "node01", "alice", "myjob", "/work").unwrap();
+        let result = JobWatcher::resolve_path(
+            "/out/%j.log",
+            "100",
+            "N/A",
+            "42",
+            "node01",
+            "alice",
+            "myjob",
+            "/work",
+        )
+        .unwrap();
         assert_eq!(result, PathBuf::from("/out/42.log"));
     }
 
     #[test]
     fn resolve_path_percent_capital_j_substitution() {
-        let result = JobWatcher::resolve_path("/out/%J.log", "100", "N/A", "99", "node01", "alice", "myjob", "/work").unwrap();
+        let result = JobWatcher::resolve_path(
+            "/out/%J.log",
+            "100",
+            "N/A",
+            "99",
+            "node01",
+            "alice",
+            "myjob",
+            "/work",
+        )
+        .unwrap();
         assert_eq!(result, PathBuf::from("/out/99.log"));
     }
 
     #[test]
     fn resolve_path_percent_u_substitution() {
-        let result = JobWatcher::resolve_path("/scratch/%u/out.log", "100", "N/A", "1", "node01", "carol", "job", "/work").unwrap();
+        let result = JobWatcher::resolve_path(
+            "/scratch/%u/out.log",
+            "100",
+            "N/A",
+            "1",
+            "node01",
+            "carol",
+            "job",
+            "/work",
+        )
+        .unwrap();
         assert_eq!(result, PathBuf::from("/scratch/carol/out.log"));
     }
 
     #[test]
     fn resolve_path_percent_x_substitution() {
-        let result = JobWatcher::resolve_path("/logs/%x.out", "100", "N/A", "5", "node01", "dave", "simulation", "/work").unwrap();
+        let result = JobWatcher::resolve_path(
+            "/logs/%x.out",
+            "100",
+            "N/A",
+            "5",
+            "node01",
+            "dave",
+            "simulation",
+            "/work",
+        )
+        .unwrap();
         assert_eq!(result, PathBuf::from("/logs/simulation.out"));
     }
 
     #[test]
     fn resolve_path_percent_a_substitution() {
-        let result = JobWatcher::resolve_path("/out/%a.log", "200", "7", "201", "node01", "alice", "job", "/work").unwrap();
+        let result = JobWatcher::resolve_path(
+            "/out/%a.log",
+            "200",
+            "7",
+            "201",
+            "node01",
+            "alice",
+            "job",
+            "/work",
+        )
+        .unwrap();
         assert_eq!(result, PathBuf::from("/out/7.log"));
     }
 
     #[test]
     fn resolve_path_percent_capital_a_substitution() {
-        let result = JobWatcher::resolve_path("/out/%A.log", "200", "7", "201", "node01", "alice", "job", "/work").unwrap();
+        let result = JobWatcher::resolve_path(
+            "/out/%A.log",
+            "200",
+            "7",
+            "201",
+            "node01",
+            "alice",
+            "job",
+            "/work",
+        )
+        .unwrap();
         assert_eq!(result, PathBuf::from("/out/200.log"));
     }
 
     #[test]
     fn resolve_path_percent_capital_n_single_node() {
-        let result = JobWatcher::resolve_path("/logs/%N.out", "1", "N/A", "10", "node01", "alice", "job", "/work").unwrap();
+        let result = JobWatcher::resolve_path(
+            "/logs/%N.out",
+            "1",
+            "N/A",
+            "10",
+            "node01",
+            "alice",
+            "job",
+            "/work",
+        )
+        .unwrap();
         assert_eq!(result, PathBuf::from("/logs/node01.out"));
     }
 
@@ -376,31 +446,72 @@ mod tests {
             "alice",
             "job",
             "/work",
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, PathBuf::from("/logs/node01.out"));
     }
 
     #[test]
     fn resolve_path_double_percent_becomes_literal() {
-        let result = JobWatcher::resolve_path("/logs/100%%.out", "1", "N/A", "10", "node01", "alice", "job", "/work").unwrap();
+        let result = JobWatcher::resolve_path(
+            "/logs/100%%.out",
+            "1",
+            "N/A",
+            "10",
+            "node01",
+            "alice",
+            "job",
+            "/work",
+        )
+        .unwrap();
         assert_eq!(result, PathBuf::from("/logs/100%.out"));
     }
 
     #[test]
     fn resolve_path_na_array_id_becomes_sentinel() {
-        let result = JobWatcher::resolve_path("/out/%a.log", "100", "N/A", "55", "node01", "alice", "job", "/work").unwrap();
+        let result = JobWatcher::resolve_path(
+            "/out/%a.log",
+            "100",
+            "N/A",
+            "55",
+            "node01",
+            "alice",
+            "job",
+            "/work",
+        )
+        .unwrap();
         assert_eq!(result, PathBuf::from("/out/4294967294.log"));
     }
 
     #[test]
     fn resolve_path_absolute_path_ignores_working_dir() {
-        let result = JobWatcher::resolve_path("/abs/path/out.log", "1", "N/A", "1", "node01", "alice", "job", "/work").unwrap();
+        let result = JobWatcher::resolve_path(
+            "/abs/path/out.log",
+            "1",
+            "N/A",
+            "1",
+            "node01",
+            "alice",
+            "job",
+            "/work",
+        )
+        .unwrap();
         assert_eq!(result, PathBuf::from("/abs/path/out.log"));
     }
 
     #[test]
     fn resolve_path_relative_path_is_joined_onto_working_dir() {
-        let result = JobWatcher::resolve_path("logs/out.log", "1", "N/A", "1", "node01", "alice", "job", "/work").unwrap();
+        let result = JobWatcher::resolve_path(
+            "logs/out.log",
+            "1",
+            "N/A",
+            "1",
+            "node01",
+            "alice",
+            "job",
+            "/work",
+        )
+        .unwrap();
         assert_eq!(result, PathBuf::from("/work/logs/out.log"));
     }
 
@@ -415,7 +526,8 @@ mod tests {
             "eve",
             "sim",
             "/home/eve",
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, PathBuf::from("/scratch/eve/sim-501.out"));
     }
 }
