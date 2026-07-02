@@ -83,69 +83,90 @@ pub struct SqueueArgs {
     nodelist: Option<String>,
 }
 
+/// A single squeue flag, either taking a value (`--name=value`) or acting as
+/// a boolean switch (`--name`).
+enum Flag<'a> {
+    Value(&'static str, Option<&'a String>),
+    Bool(&'static str, bool),
+}
+
 impl SqueueArgs {
     pub fn to_vec(&self) -> Vec<String> {
+        // Table describing every squeue flag in the same order as the struct
+        // fields above, so the two stay easy to keep in sync.
+        let flags = [
+            Flag::Value("account", self.account.as_ref()),
+            Flag::Bool("all", self.all),
+            Flag::Bool("federation", self.federation),
+            Flag::Bool("hide", self.hide),
+            Flag::Value("job", self.job.as_ref()),
+            Flag::Bool("local", self.local),
+            Flag::Value("licenses", self.licenses.as_ref()),
+            Flag::Value("clusters", self.clusters.as_ref()),
+            Flag::Bool("me", self.me),
+            Flag::Value("name", self.name.as_ref()),
+            Flag::Bool("noconvert", self.noconvert),
+            Flag::Value("partition", self.partition.as_ref()),
+            Flag::Value("qos", self.qos.as_ref()),
+            Flag::Value("reservation", self.reservation.as_ref()),
+            Flag::Bool("sibling", self.sibling),
+            Flag::Value("step", self.step.as_ref()),
+            Flag::Value("sort", self.sort.as_ref()),
+            Flag::Value("states", self.states.as_ref()),
+            Flag::Value("user", self.user.as_ref()),
+            Flag::Value("nodelist", self.nodelist.as_ref()),
+        ];
+
         let mut args = Vec::new();
-        if let Some(account) = &self.account {
-            args.push(format!("--account={}", account));
-        }
-        if self.all {
-            args.push("--all".to_string());
-        }
-        if self.federation {
-            args.push("--federation".to_string());
-        }
-        if self.hide {
-            args.push("--hide".to_string());
-        }
-        if let Some(job) = &self.job {
-            args.push(format!("--job={}", job));
-        }
-        if self.local {
-            args.push("--local".to_string());
-        }
-        if let Some(licenses) = &self.licenses {
-            args.push(format!("--licenses={}", licenses));
-        }
-        if let Some(clusters) = &self.clusters {
-            args.push(format!("--clusters={}", clusters));
-        }
-        if self.me {
-            args.push("--me".to_string());
-        }
-        if let Some(name) = &self.name {
-            args.push(format!("--name={}", name));
-        }
-        if self.noconvert {
-            args.push("--noconvert".to_string());
-        }
-        if let Some(partition) = &self.partition {
-            args.push(format!("--partition={}", partition));
-        }
-        if let Some(qos) = &self.qos {
-            args.push(format!("--qos={}", qos));
-        }
-        if let Some(reservation) = &self.reservation {
-            args.push(format!("--reservation={}", reservation));
-        }
-        if self.sibling {
-            args.push("--sibling".to_string());
-        }
-        if let Some(step) = &self.step {
-            args.push(format!("--step={}", step));
-        }
-        if let Some(sort) = &self.sort {
-            args.push(format!("--sort={}", sort));
-        }
-        if let Some(states) = &self.states {
-            args.push(format!("--states={}", states));
-        }
-        if let Some(user) = &self.user {
-            args.push(format!("--user={}", user));
-        }
-        if let Some(nodelist) = &self.nodelist {
-            args.push(format!("--nodelist={}", nodelist));
+        for flag in flags {
+            match flag {
+                Flag::Value(name, Some(value)) => args.push(format!("--{name}={value}")),
+                Flag::Value(_, None) => {}
+                Flag::Bool(name, true) => args.push(format!("--{name}")),
+                Flag::Bool(_, false) => {}
+            }
         }
         args
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn to_vec_formats_value_and_bool_flags_in_declaration_order() {
+        let args = SqueueArgs {
+            account: Some("myaccount".to_string()),
+            all: false,
+            federation: false,
+            hide: false,
+            job: Some("123,456".to_string()),
+            local: false,
+            licenses: None,
+            clusters: None,
+            me: true,
+            name: None,
+            noconvert: false,
+            partition: None,
+            qos: None,
+            reservation: None,
+            sibling: true,
+            step: None,
+            sort: None,
+            states: None,
+            user: None,
+            nodelist: None,
+        };
+
+        assert_eq!(
+            args.to_vec(),
+            vec![
+                "--account=myaccount".to_string(),
+                "--job=123,456".to_string(),
+                "--me".to_string(),
+                "--sibling".to_string(),
+            ]
+        );
     }
 }
