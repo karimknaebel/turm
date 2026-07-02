@@ -8,7 +8,7 @@ use std::{cmp::min, iter::once, path::PathBuf, process::Command, time::Duration}
 use crate::file_watcher::{FileWatcherError, FileWatcherHandle};
 use crate::job_watcher::JobWatcherHandle;
 
-use crossterm::event::{Event, KeyCode, KeyEvent, MouseButton, MouseEventKind};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::{
     Frame, Terminal,
     backend::Backend,
@@ -34,6 +34,15 @@ pub enum Dialog {
 struct CommandFailure {
     command: String,
     output: String,
+}
+
+impl From<CommandFailure> for Dialog {
+    fn from(failure: CommandFailure) -> Self {
+        Dialog::CommandError {
+            command: failure.command,
+            output: failure.output,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -125,6 +134,15 @@ pub(crate) enum MouseScrollTarget {
 
 const SCANCEL_SIGNALS: &[&str] = &["TERM", "INT", "HUP", "USR1", "USR2", "STOP", "CONT", "KILL"];
 const DIALOG_WIDTH: u16 = 80;
+const FAST_SCROLL_LINES: u16 = 50;
+
+fn page_scroll_delta(modifiers: KeyModifiers) -> u16 {
+    if modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        FAST_SCROLL_LINES
+    } else {
+        1
+    }
+}
 
 impl App {
     pub fn new(
@@ -379,8 +397,8 @@ impl App {
                     if let Some((id, time_limit)) = timelimit_request {
                         command_failure = execute_scontrol_update_timelimit(&id, &time_limit).err();
                     }
-                    if let Some(CommandFailure { command, output }) = command_failure {
-                        self.dialog = Some(Dialog::CommandError { command, output });
+                    if let Some(failure) = command_failure {
+                        self.dialog = Some(failure.into());
                     } else if close_dialog {
                         self.dialog = None;
                     }
@@ -421,28 +439,10 @@ impl App {
                             }
                         },
                         KeyCode::PageDown => {
-                            let delta = if key.modifiers.intersects(
-                                crossterm::event::KeyModifiers::SHIFT
-                                    | crossterm::event::KeyModifiers::CONTROL
-                                    | crossterm::event::KeyModifiers::ALT,
-                            ) {
-                                50
-                            } else {
-                                1
-                            };
-                            self.scroll_job_output_down_by(delta);
+                            self.scroll_job_output_down_by(page_scroll_delta(key.modifiers));
                         }
                         KeyCode::PageUp => {
-                            let delta = if key.modifiers.intersects(
-                                crossterm::event::KeyModifiers::SHIFT
-                                    | crossterm::event::KeyModifiers::CONTROL
-                                    | crossterm::event::KeyModifiers::ALT,
-                            ) {
-                                50
-                            } else {
-                                1
-                            };
-                            self.scroll_job_output_up_by(delta);
+                            self.scroll_job_output_up_by(page_scroll_delta(key.modifiers));
                         }
                         KeyCode::Home => {
                             self.job_output_offset = 0;
@@ -552,23 +552,7 @@ impl App {
             ("o", "toggle stdout/stderr"),
             ("w", "toggle text wrap"),
         ];
-        let blue_style = Style::default().fg(Color::Blue);
-        let light_blue_style = Style::default().fg(Color::LightBlue);
-
-        let help = Line::from(help_options.iter().fold(
-            Vec::new(),
-            |mut acc, (key, description)| {
-                if !acc.is_empty() {
-                    acc.push(Span::raw(" | "));
-                }
-                acc.push(Span::styled(*key, blue_style));
-                acc.push(Span::raw(": "));
-                acc.push(Span::styled(*description, light_blue_style));
-                acc
-            },
-        ));
-
-        let help = Paragraph::new(help);
+        let help = Paragraph::new(help_line(&help_options));
         f.render_widget(help, content_help[1]);
 
         // Jobs
@@ -652,61 +636,37 @@ impl App {
             .and_then(|i| self.jobs.get(i));
 
         let job_detail = job_detail.map(|j| {
-            let mut state_spans = vec![
-                Span::styled("State  ", Style::default().fg(Color::Yellow)),
-                Span::raw(" "),
-                Span::raw(&j.state),
-            ];
+            let mut state = detail_line("State", &j.state);
             if j.state == "PENDING" {
-                state_spans.extend([
+                state.spans.extend([
                     Span::styled(" Start ", Style::default().fg(Color::Yellow)),
                     Span::raw(&j.start_time),
                 ]);
             }
             if let Some(s) = j.reason.as_deref() {
-                state_spans.extend([
+                state.spans.extend([
                     Span::styled(" Reason ", Style::default().fg(Color::Yellow)),
                     Span::raw(s),
                 ]);
             }
-            let state = Line::from(state_spans);
-            let name = Line::from(vec![
-                Span::styled("Name   ", Style::default().fg(Color::Yellow)),
-                Span::raw(" "),
-                Span::raw(&j.name),
-            ]);
-            let command = Line::from(vec![
-                Span::styled("Command", Style::default().fg(Color::Yellow)),
-                Span::raw(" "),
-                Span::raw(&j.command),
-            ]);
-            let nodes = Line::from(vec![
-                Span::styled("Nodes  ", Style::default().fg(Color::Yellow)),
-                Span::raw(" "),
-                Span::raw(&j.nodelist),
-            ]);
-            let tres = Line::from(vec![
-                Span::styled("TRES   ", Style::default().fg(Color::Yellow)),
-                Span::raw(" "),
-                Span::raw(&j.tres),
-            ]);
+            let name = detail_line("Name", &j.name);
+            let command = detail_line("Command", &j.command);
+            let nodes = detail_line("Nodes", &j.nodelist);
+            let tres = detail_line("TRES", &j.tres);
             let ui_stdout_text = match self.output_file_view {
-                OutputFileView::Stdout => "stdout ",
-                OutputFileView::Stderr => "stderr ",
+                OutputFileView::Stdout => "stdout",
+                OutputFileView::Stderr => "stderr",
             };
-            let stdout = Line::from(vec![
-                Span::styled(ui_stdout_text, Style::default().fg(Color::Yellow)),
-                Span::raw(" "),
-                Span::raw(
-                    match self.output_file_view {
-                        OutputFileView::Stdout => &j.stdout,
-                        OutputFileView::Stderr => &j.stderr,
-                    }
-                    .as_ref()
-                    .map(|p| p.to_str().unwrap_or_default())
-                    .unwrap_or_default(),
-                ),
-            ]);
+            let stdout = detail_line(
+                ui_stdout_text,
+                match self.output_file_view {
+                    OutputFileView::Stdout => &j.stdout,
+                    OutputFileView::Stderr => &j.stderr,
+                }
+                .as_ref()
+                .map(|p| p.to_str().unwrap_or_default())
+                .unwrap_or_default(),
+            );
 
             Text::from(vec![state, name, command, nodes, tres, stdout])
         });
@@ -923,6 +883,32 @@ fn render_dialog(
     inner
 }
 
+fn help_line<'a>(entries: &[(&'a str, &'a str)]) -> Line<'a> {
+    let blue_style = Style::default().fg(Color::Blue);
+    let light_blue_style = Style::default().fg(Color::LightBlue);
+
+    Line::from(
+        entries
+            .iter()
+            .fold(Vec::new(), |mut acc, (key, description)| {
+                if !acc.is_empty() {
+                    acc.push(Span::raw(" | "));
+                }
+                acc.push(Span::styled(*key, blue_style));
+                acc.push(Span::raw(": "));
+                acc.push(Span::styled(*description, light_blue_style));
+                acc
+            }),
+    )
+}
+
+fn detail_line<'a>(label: &str, value: &'a str) -> Line<'a> {
+    Line::from(vec![
+        Span::styled(format!("{label:<7}"), Style::default().fg(Color::Yellow)),
+        Span::raw(" "),
+        Span::raw(value),
+    ])
+}
 fn chunked_string(s: &str, first_chunk_size: usize, chunk_size: usize) -> Vec<&str> {
     let stepped_indices = s
         .char_indices()
