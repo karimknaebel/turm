@@ -26,6 +26,7 @@ impl JobWatcher {
 
     fn run(&mut self) -> Self {
         let output_separator = "###turm###";
+        // Order must match the slice pattern destructuring `parts` below field-for-field.
         let fields = [
             "jobid",
             "name",
@@ -66,54 +67,55 @@ impl JobWatcher {
                 .filter_map(|l| {
                     let parts: Vec<_> = l.split(output_separator).collect();
 
-                    if parts.len() != fields.len() + 1 {
+                    let [
+                        id,
+                        name,
+                        state,
+                        user,
+                        time,
+                        time_limit,
+                        start_time,
+                        tres,
+                        partition,
+                        nodelist,
+                        stdout,
+                        stderr,
+                        command,
+                        state_compact,
+                        reason,
+                        array_job_id,
+                        array_task_id,
+                        node_list,
+                        working_dir,
+                        _trailing,
+                    ] = parts.as_slice()
+                    else {
                         return None;
-                    }
-
-                    let id = parts[0];
-                    let name = parts[1];
-                    let state = parts[2];
-                    let user = parts[3];
-                    let time = parts[4];
-                    let time_limit = parts[5];
-                    let start_time = parts[6];
-                    let tres = parts[7];
-                    let partition = parts[8];
-                    let nodelist = parts[9];
-                    let stdout = parts[10];
-                    let stderr = parts[11];
-                    let command = parts[12];
-                    let state_compact = parts[13];
-                    let reason = parts[14];
-
-                    let array_job_id = parts[15];
-                    let array_task_id = parts[16];
-                    let node_list = parts[17];
-                    let working_dir = parts[18];
+                    };
 
                     Some(Job {
-                        job_id: id.to_owned(),
-                        array_id: array_job_id.to_owned(),
-                        array_step: match array_task_id {
+                        job_id: id.to_string(),
+                        array_id: array_job_id.to_string(),
+                        array_step: match *array_task_id {
                             "N/A" => None,
-                            _ => Some(array_task_id.to_owned()),
+                            _ => Some(array_task_id.to_string()),
                         },
-                        name: name.to_owned(),
-                        state: state.to_owned(),
-                        state_compact: state_compact.to_owned(),
-                        reason: if reason == "None" {
+                        name: name.to_string(),
+                        state: state.to_string(),
+                        state_compact: state_compact.to_string(),
+                        reason: if *reason == "None" {
                             None
                         } else {
-                            Some(reason.to_owned())
+                            Some(reason.to_string())
                         },
-                        user: user.to_owned(),
-                        time: time.to_owned(),
-                        time_limit: time_limit.to_owned(),
-                        start_time: start_time.to_owned(),
-                        tres: tres.to_owned(),
-                        partition: partition.to_owned(),
-                        nodelist: nodelist.to_owned(),
-                        command: command.to_owned(),
+                        user: user.to_string(),
+                        time: time.to_string(),
+                        time_limit: time_limit.to_string(),
+                        start_time: start_time.to_string(),
+                        tres: tres.to_string(),
+                        partition: partition.to_string(),
+                        nodelist: nodelist.to_string(),
+                        command: command.to_string(),
                         stdout: Self::resolve_path(
                             stdout,
                             array_job_id,
