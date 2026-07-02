@@ -3,7 +3,13 @@ use crossbeam::{
     select,
 };
 use itertools::Either;
-use std::{cmp::min, iter::once, path::PathBuf, process::Command, time::Duration};
+use std::{
+    cmp::min,
+    iter::once,
+    path::{Path, PathBuf},
+    process::Command,
+    time::Duration,
+};
 
 use crate::file_watcher::{FileWatcherError, FileWatcherHandle};
 use crate::job_watcher::JobWatcherHandle;
@@ -68,6 +74,7 @@ pub struct App {
     job_list_area: Rect,
     job_output_area: Rect,
     pending_input_event: Option<Event>,
+    pending_open_in_external: Option<PathBuf>,
 }
 
 pub struct Job {
@@ -160,6 +167,7 @@ impl App {
             job_list_area: Rect::default(),
             job_output_area: Rect::default(),
             pending_input_event: None,
+            pending_open_in_external: None,
         }
     }
 }
@@ -168,7 +176,8 @@ impl App {
     pub fn run<B: Backend<Error = io::Error>>(
         &mut self,
         terminal: &mut Terminal<B>,
-    ) -> io::Result<()> {
+        suspend: impl Fn() -> io::Result<()>,
+        resume: impl Fn() -> io::Result<()>,) -> io::Result<()> {
         terminal.draw(|f| self.ui(f))?;
 
         loop {
@@ -189,7 +198,17 @@ impl App {
                 return Ok(());
             }
 
-            if should_draw {
+            if let Some(path) = self.pending_open_in_external.take() {
+                suspend()?;
+                let viewer_result = open_in_pager(&path);
+                resume()?;
+                while self.input_receiver.try_recv().is_ok() {}
+                terminal.clear()?;
+                if let Err(CommandFailure { command, output }) = viewer_result {
+                    self.dialog = Some(Dialog::CommandError { command, output });
+                }
+                terminal.draw(|f| self.ui(f))?;
+            } else if should_draw {
                 terminal.draw(|f| self.ui(f))?;
             }
         }
@@ -277,6 +296,15 @@ impl App {
             Some(MouseScrollTarget::Output)
         } else {
             None
+        }
+    }
+
+    fn current_log_path(&self) -> Option<PathBuf> {
+        let i = self.job_list_state.selected()?;
+        let job = self.jobs.get(i)?;
+        match self.output_file_view {
+            OutputFileView::Stdout => job.stdout.clone(),
+            OutputFileView::Stderr => job.stderr.clone(),
         }
     }
 
@@ -482,6 +510,17 @@ impl App {
                         KeyCode::Char('w') => {
                             self.job_output_wrap = !self.job_output_wrap;
                         }
+                        KeyCode::Char('O') => {
+                            if let Some(path) = self.current_log_path() {
+                                match std::fs::File::open(&path) {
+                                    Ok(_) => self.pending_open_in_external = Some(path),
+                                    Err(e) => self.dialog = Some(Dialog::CommandError {
+                                        command: path.to_string_lossy().into_owned(),
+                                        output: e.to_string(),
+                                    }),
+                                }
+                            }
+                        }
                         _ => {}
                     };
                 }
@@ -550,6 +589,7 @@ impl App {
             ("c/C", "cancel/signal"),
             ("t", "set time limit"),
             ("o", "toggle stdout/stderr"),
+            ("O", "open in $TURM_PAGER"),
             ("w", "toggle text wrap"),
         ];
         let blue_style = Style::default().fg(Color::Blue);
@@ -1194,6 +1234,27 @@ fn execute_command(mut command: Command, command_label: String) -> Result<(), Co
         command: command_label,
         output: details.join("\n\n"),
     })
+}
+
+fn open_in_pager(path: &Path) -> Result<(), CommandFailure> {
+    let pager = std::env::var("TURM_PAGER")
+        .unwrap_or_else(|_| "less".to_string());
+
+    let mut parts = pager.split_whitespace();
+    let program = parts.next().unwrap_or("less");
+    let args: Vec<&str> = parts.collect();
+
+    match Command::new(program).args(&args).arg(path).status() {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => Err(CommandFailure {
+            command: pager,
+            output: format!("Exited with {s}"),
+        }),
+        Err(e) => Err(CommandFailure {
+            command: pager,
+            output: e.to_string(),
+        }),
+    }
 }
 
 #[cfg(test)]

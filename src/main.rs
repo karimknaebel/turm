@@ -23,7 +23,11 @@ use ratatui::{
     backend::{Backend, CrosstermBackend},
 };
 use squeue_args::SqueueArgs;
-use std::io::Write;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::Duration;
 use std::{io, panic, thread};
 
 #[derive(Parser)]
@@ -67,73 +71,110 @@ fn main() -> io::Result<()> {
 
     install_panic_hook();
 
-    let mut terminal_guard = TerminalGuard::new(io::stdout())?;
+    let mut terminal_guard = TerminalGuard::new()?;
     run_app(terminal_guard.terminal_mut(), args)
+}
+
+fn suspend_terminal() -> io::Result<()> {
+    disable_raw_mode()?;
+    execute!(
+        io::stdout(),
+        LeaveAlternateScreen,
+        DisableBracketedPaste,
+        DisableMouseCapture,
+        Show
+    )?;
+    Ok(())
+}
+
+fn resume_terminal() -> io::Result<()> {
+    enable_raw_mode()?;
+    execute!(
+        io::stdout(),
+        EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableMouseCapture
+    )?;
+    Ok(())
 }
 
 fn install_panic_hook() {
     let default_hook = panic::take_hook();
     panic::set_hook(Box::new(move |panic_info| {
-        let _ = disable_raw_mode();
-        let _ = execute!(
-            io::stdout(),
-            LeaveAlternateScreen,
-            DisableBracketedPaste,
-            DisableMouseCapture,
-            Show
-        );
+        let _ = suspend_terminal();
         default_hook(panic_info);
     }));
 }
 
-struct TerminalGuard<W: Write> {
-    terminal: Terminal<CrosstermBackend<W>>,
+struct TerminalGuard {
+    terminal: Terminal<CrosstermBackend<io::Stdout>>,
 }
 
-impl<W: Write> TerminalGuard<W> {
-    fn new(mut writer: W) -> io::Result<Self> {
-        enable_raw_mode()?;
-        execute!(
-            writer,
-            EnterAlternateScreen,
-            EnableBracketedPaste,
-            EnableMouseCapture
-        )?;
-        let backend = CrosstermBackend::new(writer);
+impl TerminalGuard {
+    fn new() -> io::Result<Self> {
+        resume_terminal()?;
+        let backend = CrosstermBackend::new(io::stdout());
         let terminal = Terminal::new(backend)?;
         Ok(Self { terminal })
     }
 
-    fn terminal_mut(&mut self) -> &mut Terminal<CrosstermBackend<W>> {
+    fn terminal_mut(&mut self) -> &mut Terminal<CrosstermBackend<io::Stdout>> {
         &mut self.terminal
     }
 }
 
-impl<W: Write> Drop for TerminalGuard<W> {
+impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = disable_raw_mode();
-        let _ = execute!(
-            self.terminal.backend_mut(),
-            LeaveAlternateScreen,
-            DisableBracketedPaste,
-            DisableMouseCapture
-        );
-        let _ = self.terminal.show_cursor();
+        let _ = suspend_terminal();
     }
 }
 
-fn input_loop(tx: Sender<std::io::Result<Event>>) {
-    while tx.send(event::read()).is_ok() {}
+fn input_loop(tx: Sender<std::io::Result<Event>>, suspended: Arc<AtomicBool>) {
+    loop {
+        if suspended.load(Ordering::Relaxed) {
+            thread::sleep(Duration::from_millis(50));
+            continue;
+        }
+        match event::poll(Duration::from_millis(50)) {
+            Ok(true) => {
+                if !suspended.load(Ordering::Relaxed) && tx.send(event::read()).is_err() {
+                    break;
+                }
+            }
+            Ok(false) => {}
+            Err(e) => {
+                if tx.send(Err(e)).is_err() {
+                    break;
+                }
+            }
+        }
+    }
 }
 
 fn run_app<B: Backend<Error = io::Error>>(terminal: &mut Terminal<B>, args: Cli) -> io::Result<()> {
     let (input_tx, input_rx) = unbounded();
+    let suspended = Arc::new(AtomicBool::new(false));
+    let suspend = {
+        let suspended = suspended.clone();
+        move || -> io::Result<()> {
+            suspended.store(true, Ordering::SeqCst);
+            suspend_terminal()
+        }
+    };
+    let resume = {
+        let suspended = suspended.clone();
+        move || -> io::Result<()> {
+            let result = resume_terminal();
+            suspended.store(false, Ordering::SeqCst);
+            result
+        }
+    };
     let mut app = App::new(
         input_rx,
         args.slurm_refresh,
         args.file_refresh,
         args.squeue_args.to_vec(),
     );
-    thread::spawn(move || input_loop(input_tx));
-    app.run(terminal)
+    thread::spawn(move || input_loop(input_tx, suspended));
+    app.run(terminal, suspend, resume)
 }
