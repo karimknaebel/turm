@@ -10,7 +10,7 @@ use crate::input::{Input as TerminalInput, PAGER_KEY};
 use crate::job_watcher::JobWatcherHandle;
 use crate::pager::PagerChild;
 
-use crossterm::event::{Event, KeyCode, KeyEvent, MouseButton, MouseEventKind};
+use crossterm::event::{Event, KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
     Frame, Terminal,
     backend::Backend,
@@ -74,6 +74,8 @@ pub struct App {
     job_list_height: u16,
     job_list_area: Rect,
     job_output_area: Rect,
+    content_area: Rect,
+    panel_split: PanelSplit,
     pending_input_event: Option<Event>,
     pager_path: Option<PathBuf>,
 }
@@ -133,6 +135,7 @@ pub(crate) enum MouseScrollTarget {
 
 const SCANCEL_SIGNALS: &[&str] = &["TERM", "INT", "HUP", "USR1", "USR2", "STOP", "CONT", "KILL"];
 const DIALOG_WIDTH: u16 = 80;
+const MIN_PANEL_WIDTH: u16 = 3;
 
 impl App {
     pub fn new(slurm_refresh_rate: u64, file_refresh_rate: u64, squeue_args: Vec<String>) -> App {
@@ -162,6 +165,8 @@ impl App {
             job_list_height: 0,
             job_list_area: Rect::default(),
             job_output_area: Rect::default(),
+            content_area: Rect::default(),
+            panel_split: PanelSplit::default(),
             pending_input_event: None,
             pager_path: None,
         }
@@ -242,6 +247,7 @@ impl App {
     fn handle_input_event(&mut self, event: Event) -> (bool, bool) {
         match event {
             Event::Key(key) => {
+                self.panel_split.drag = None;
                 if key.code == KeyCode::Char('q') {
                     return (true, false);
                 }
@@ -252,11 +258,16 @@ impl App {
                 (false, true)
             }
             Event::Paste(_) => (false, false),
+            Event::Mouse(_) if self.dialog.is_some() => (false, false),
+            Event::Mouse(mouse)
+                if self
+                    .panel_split
+                    .handle_mouse(mouse, self.job_list_area, self.content_area) =>
+            {
+                (false, true)
+            }
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
-                    if self.dialog.is_some() {
-                        return (false, false);
-                    }
                     if let Some(index) = self.job_index_at(mouse.column, mouse.row) {
                         if self.job_list_state.selected() != Some(index) {
                             self.handle(AppMessage::MouseClick(index));
@@ -266,7 +277,7 @@ impl App {
                     (false, false)
                 }
                 MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                    if self.dialog.is_some() {
+                    if self.panel_split.drag.is_some() {
                         return (false, false);
                     }
                     let Some(target) = self.mouse_scroll_target(mouse.column, mouse.row) else {
@@ -298,7 +309,10 @@ impl App {
                 }
                 _ => (false, false),
             },
-            Event::Resize(_, _) => (false, true),
+            Event::Resize(_, _) => {
+                self.panel_split.drag = None;
+                (false, true)
+            }
             _ => (false, false),
         }
     }
@@ -547,6 +561,8 @@ impl App {
             }
         }
 
+        clamp_job_selection(&mut self.job_list_state, self.jobs.len());
+
         // update
         self.job_output_watcher
             .set_file_path(self.selected_log_path().cloned());
@@ -560,10 +576,8 @@ impl App {
             .constraints([Constraint::Min(3), Constraint::Length(1)].as_ref())
             .split(f.area());
 
-        let master_detail = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(50), Constraint::Percentage(70)].as_ref())
-            .split(content_help[0]);
+        let master_detail = self.panel_split.areas(content_help[0]);
+        self.content_area = content_help[0];
 
         let job_detail_log = Layout::default()
             .direction(Direction::Vertical)
@@ -1140,11 +1154,103 @@ impl App {
     }
 }
 
+fn clamp_job_selection(state: &mut ListState, job_count: usize) {
+    // Ratatui clamps selection during rendering, but returns early for an empty inner area.
+    // Clamp here so job actions still work when the Jobs pane is collapsed.
+    if job_count == 0 {
+        state.select(None);
+    } else if let Some(index) = state.selected() {
+        state.select(Some(index.min(job_count - 1)));
+    }
+}
+
 fn rect_contains(rect: Rect, column: u16, row: u16) -> bool {
     column >= rect.x
         && column < rect.x.saturating_add(rect.width)
         && row >= rect.y
         && row < rect.y.saturating_add(rect.height)
+}
+
+#[derive(Default)]
+struct PanelSplit {
+    ratio: Option<(u16, u16)>,
+    drag: Option<PanelDrag>,
+}
+
+struct PanelDrag {
+    column: u16,
+    width: u16,
+}
+
+impl PanelSplit {
+    fn areas(&self, mut area: Rect) -> [Rect; 2] {
+        if area.width < MIN_PANEL_WIDTH {
+            area.width = 0;
+        }
+        let (width, total) = self.ratio.unwrap_or((30, 100));
+        let jobs_width = snap_panel_width(
+            (u32::from(width) * u32::from(area.width)).div_ceil(u32::from(total)) as u16,
+            area.width,
+        );
+        [
+            Rect::new(area.x, area.y, jobs_width, area.height),
+            Rect::new(
+                area.x + jobs_width,
+                area.y,
+                area.width - jobs_width,
+                area.height,
+            ),
+        ]
+    }
+
+    fn handle_mouse(&mut self, mouse: MouseEvent, jobs: Rect, content: Rect) -> bool {
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.drag = None;
+                if !rect_contains(content, mouse.column, mouse.row)
+                    || mouse.column < jobs.right().saturating_sub(1)
+                    || mouse.column > jobs.right()
+                {
+                    return false;
+                }
+                self.drag = Some(PanelDrag {
+                    column: mouse.column,
+                    width: jobs.width,
+                });
+                true
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let Some(drag) = &self.drag else {
+                    return false;
+                };
+                let delta = i32::from(mouse.column) - i32::from(drag.column);
+                if delta == 0 && jobs.width == drag.width {
+                    return false;
+                }
+                let width = if mouse.column <= content.x {
+                    0
+                } else if mouse.column >= content.right() - 1 {
+                    content.width
+                } else {
+                    (i32::from(drag.width) + delta).clamp(0, i32::from(content.width)) as u16
+                };
+                self.ratio = Some((snap_panel_width(width, content.width), content.width));
+                true
+            }
+            MouseEventKind::Up(MouseButton::Left) => self.drag.take().is_some(),
+            _ => false,
+        }
+    }
+}
+
+fn snap_panel_width(width: u16, total: u16) -> u16 {
+    if width < MIN_PANEL_WIDTH {
+        0
+    } else if total - width < MIN_PANEL_WIDTH {
+        total
+    } else {
+        width
+    }
 }
 
 fn mouse_wheel_direction(kind: MouseEventKind) -> Option<MouseWheelDirection> {
@@ -1244,6 +1350,21 @@ fn execute_command(mut command: Command, command_label: String) -> Result<(), Co
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::KeyModifiers;
+    use ratatui::{buffer::Buffer, widgets::StatefulWidget};
+
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn jobs_area(split: &PanelSplit, area: Rect) -> Rect {
+        split.areas(area)[0]
+    }
 
     #[test]
     fn test_chunked_string() {
@@ -1283,6 +1404,193 @@ mod tests {
         let input = "123456789";
         let expected = vec!["123456789"];
         assert_eq!(chunked_string(input, 0, 0), expected);
+    }
+
+    #[test]
+    fn panel_drag_moves_from_either_border_without_jumping() {
+        let area = Rect::new(10, 5, 240, 24);
+        for border in [0, 1] {
+            let mut split = PanelSplit::default();
+            let jobs = jobs_area(&split, area);
+            let column = jobs.right() - border;
+            assert!(split.handle_mouse(
+                mouse(MouseEventKind::Down(MouseButton::Left), column, 6),
+                jobs,
+                area,
+            ));
+            assert_eq!(jobs_area(&split, area), jobs);
+            for distance in [1, 2, 0] {
+                split.handle_mouse(
+                    mouse(
+                        MouseEventKind::Drag(MouseButton::Left),
+                        column - distance,
+                        6,
+                    ),
+                    jobs_area(&split, area),
+                    area,
+                );
+                assert_eq!(jobs_area(&split, area).width, jobs.width - distance);
+            }
+            split.handle_mouse(
+                mouse(MouseEventKind::Up(MouseButton::Left), column, 6),
+                jobs,
+                area,
+            );
+            assert!(!split.handle_mouse(
+                mouse(MouseEventKind::Drag(MouseButton::Left), column + 1, 6),
+                jobs,
+                area,
+            ));
+            assert_eq!(jobs_area(&split, area), jobs);
+        }
+    }
+
+    #[test]
+    fn panel_resize_does_not_capture_job_text_or_help_clicks() {
+        let area = Rect::new(10, 5, 120, 24);
+        let mut split = PanelSplit::default();
+        let jobs = jobs_area(&split, area);
+        for (column, row) in [
+            (jobs.right() - 2, 6),
+            (jobs.right() + 1, 6),
+            (jobs.right(), area.bottom()),
+        ] {
+            assert!(!split.handle_mouse(
+                mouse(MouseEventKind::Down(MouseButton::Left), column, row),
+                jobs,
+                area,
+            ));
+            assert!(!split.handle_mouse(
+                mouse(MouseEventKind::Drag(MouseButton::Left), column + 1, row),
+                jobs,
+                area,
+            ));
+        }
+        assert!(!split.handle_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 0, 0),
+            Rect::default(),
+            Rect::default(),
+        ));
+    }
+
+    #[test]
+    fn panels_can_collapse_reopen_and_scale_proportionally() {
+        let area = Rect::new(10, 5, 200, 24);
+        for (edge, collapsed_width, column, reopened_width) in [
+            (area.x, 0, area.x + 10, 10),
+            (area.right() - 1, 200, area.right() - 11, 190),
+        ] {
+            let mut split = PanelSplit::default();
+            let jobs = jobs_area(&split, area);
+            assert!(split.handle_mouse(
+                mouse(MouseEventKind::Down(MouseButton::Left), jobs.right(), 6),
+                jobs,
+                area,
+            ));
+            split.handle_mouse(
+                mouse(MouseEventKind::Drag(MouseButton::Left), edge, 6),
+                jobs,
+                area,
+            );
+            assert_eq!(jobs_area(&split, area).width, collapsed_width);
+            split.handle_mouse(
+                mouse(MouseEventKind::Up(MouseButton::Left), edge, 6),
+                jobs_area(&split, area),
+                area,
+            );
+            assert!(split.handle_mouse(
+                mouse(MouseEventKind::Down(MouseButton::Left), edge, 6),
+                jobs_area(&split, area),
+                area,
+            ));
+            split.handle_mouse(
+                mouse(MouseEventKind::Drag(MouseButton::Left), column, 6),
+                jobs_area(&split, area),
+                area,
+            );
+            assert_eq!(jobs_area(&split, area).width, reopened_width);
+            for width in [60, 400, 200] {
+                assert_eq!(
+                    jobs_area(&split, Rect::new(10, 5, width, 24)).width,
+                    (u32::from(reopened_width) * u32::from(width) / 200) as u16,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn panels_skip_border_only_widths() {
+        let area = Rect::new(10, 5, 100, 24);
+        for (width, expected) in [(1, 0), (2, 0), (3, 3), (97, 97), (98, 100), (99, 100)] {
+            let mut split = PanelSplit::default();
+            let jobs = jobs_area(&split, area);
+            split.handle_mouse(
+                mouse(MouseEventKind::Down(MouseButton::Left), jobs.right(), 6),
+                jobs,
+                area,
+            );
+            split.handle_mouse(
+                mouse(MouseEventKind::Drag(MouseButton::Left), area.x + width, 6),
+                jobs,
+                area,
+            );
+            assert_eq!(jobs_area(&split, area).width, expected);
+            assert_eq!(
+                jobs_area(&split, Rect::new(10, 5, 200, 24)).width,
+                expected * 2
+            );
+        }
+
+        for (ratio, widths) in [((5, 100), [0, 3, 5]), ((95, 100), [40, 57, 95])] {
+            let split = PanelSplit {
+                ratio: Some(ratio),
+                ..PanelSplit::default()
+            };
+            for (width, expected) in [40, 60, 100].into_iter().zip(widths) {
+                assert_eq!(
+                    jobs_area(&split, Rect::new(0, 0, width, 24)).width,
+                    expected
+                );
+            }
+            for width in 0..MIN_PANEL_WIDTH {
+                assert!(
+                    split
+                        .areas(Rect::new(0, 0, width, 24))
+                        .into_iter()
+                        .all(Rect::is_empty)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn collapsed_jobs_keep_navigation_selection_in_bounds() {
+        for jobs in [&["first", "second", "last"][..], &[][..]] {
+            for width in 0..=2 {
+                let area = Rect::new(0, 0, width, 10);
+                let mut state = ListState::default();
+                for navigate in [
+                    ListState::select_last as fn(&mut ListState),
+                    ListState::select_next,
+                    |state| state.scroll_down_by(10),
+                ] {
+                    navigate(&mut state);
+                    clamp_job_selection(&mut state, jobs.len());
+                    assert_eq!(state.selected(), jobs.len().checked_sub(1));
+                    StatefulWidget::render(
+                        List::new(jobs.iter().copied())
+                            .block(Block::default().borders(Borders::ALL)),
+                        area,
+                        &mut Buffer::empty(area),
+                        &mut state,
+                    );
+                    assert_eq!(
+                        state.selected().and_then(|index| jobs.get(index)),
+                        jobs.last()
+                    );
+                }
+            }
+        }
     }
 
     #[test]
