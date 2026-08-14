@@ -91,4 +91,4 @@ The mock commands read/write files in `scripts/mock-slurm/logs`, so you can test
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=karimknaebel/turm&type=Date)](https://www.star-history.com/#karimknaebel/turm&Date)
+[![Star History Chart](https://star-history.dera.page/svg?repos=karimknaebel/turm&type=Date)](https://star-history.dera.page/#karimknaebel/turm&Date)
