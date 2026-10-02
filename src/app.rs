@@ -3,12 +3,19 @@ use crossbeam::{
     select,
 };
 use itertools::Either;
-use std::{cmp::min, iter::once, path::PathBuf, process::Command, time::Duration};
+use std::{
+    cmp::min, collections::HashSet, iter::once, ops::RangeInclusive, path::PathBuf,
+    process::Command, time::Duration,
+};
 
 use crate::file_watcher::{FileWatcherError, FileWatcherHandle};
 use crate::job_watcher::JobWatcherHandle;
 
-use crossterm::event::{Event, KeyCode, KeyEvent, MouseButton, MouseEventKind};
+use crossterm::{
+    clipboard::CopyToClipboard,
+    event::{Event, KeyCode, KeyEvent, MouseButton, MouseEventKind},
+    execute,
+};
 use ratatui::{
     Frame, Terminal,
     backend::Backend,
@@ -25,10 +32,22 @@ pub enum Focus {
 }
 
 pub enum Dialog {
-    ConfirmCancelJob(String),
-    SelectCancelSignal { id: String, selected_signal: usize },
-    EditTimeLimit { id: String, input: Input },
-    CommandError { command: String, output: String },
+    ConfirmCancelJob(Vec<String>),
+    SelectCancelSignal {
+        ids: Vec<String>,
+        selected_signal: usize,
+    },
+    EditTimeLimit {
+        ids: Vec<String>,
+        input: Input,
+    },
+    CommandError {
+        command: String,
+        output: String,
+    },
+    Help {
+        scroll: u16,
+    },
 }
 
 struct CommandFailure {
@@ -45,6 +64,28 @@ pub enum ScrollAnchor {
 #[derive(Default)]
 pub enum OutputFileView {
     #[default]
+    Stdout,
+    Stderr,
+}
+
+#[derive(Clone, Copy)]
+enum HoldAction {
+    Hold,
+    Release,
+}
+
+impl HoldAction {
+    fn subcommand(self) -> &'static str {
+        match self {
+            HoldAction::Hold => "hold",
+            HoldAction::Release => "release",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CopyTarget {
+    JobId,
     Stdout,
     Stderr,
 }
@@ -67,7 +108,16 @@ pub struct App {
     job_list_height: u16,
     job_list_area: Rect,
     job_output_area: Rect,
+    /// Number of help dialog lines visible at once, updated on every draw.
+    help_viewport_height: u16,
     pending_input_event: Option<Event>,
+    /// Ids of jobs toggled with <space> (or committed from a visual selection).
+    marked_jobs: HashSet<String>,
+    /// Id of the job where visual selection (`v`) started.
+    visual_anchor: Option<String>,
+    /// `y` was pressed and we are waiting for the copy target key.
+    pending_yank: bool,
+    status_message: Option<String>,
 }
 
 pub struct Job {
@@ -126,6 +176,54 @@ pub(crate) enum MouseScrollTarget {
 const SCANCEL_SIGNALS: &[&str] = &["TERM", "INT", "HUP", "USR1", "USR2", "STOP", "CONT", "KILL"];
 const DIALOG_WIDTH: u16 = 80;
 
+/// All key bindings, grouped by section, as shown in the help dialog (`?`).
+const KEYMAPS: &[(&str, &[(&str, &str)])] = &[
+    (
+        "Navigation",
+        &[
+            ("j/k, ⏶/⏷", "next/previous job"),
+            ("g/G", "first/last job"),
+            ("ctrl+d/ctrl+u", "half page down/up"),
+        ],
+    ),
+    (
+        "Selection",
+        &[
+            ("space", "toggle job selection"),
+            ("v", "visual selection (again to keep it)"),
+            ("esc", "clear selection"),
+        ],
+    ),
+    (
+        "Actions (on selected jobs, or the job under the cursor)",
+        &[
+            ("c", "cancel"),
+            ("C", "send signal"),
+            ("H/R", "hold/release"),
+            ("t", "set time limit"),
+            ("yj", "copy job id"),
+            ("yo/ye", "copy stdout/stderr path"),
+        ],
+    ),
+    (
+        "Output",
+        &[
+            ("o", "toggle stdout/stderr"),
+            ("w", "toggle text wrap"),
+            ("pgup/pgdown", "scroll (shift: faster)"),
+            ("home/end", "top/bottom"),
+        ],
+    ),
+    (
+        "General",
+        &[
+            ("?", "show this help (j/k, pgup/pgdown to scroll)"),
+            ("enter/esc", "confirm/close dialog"),
+            ("q", "quit"),
+        ],
+    ),
+];
+
 impl App {
     pub fn new(
         input_receiver: Receiver<std::io::Result<Event>>,
@@ -159,7 +257,12 @@ impl App {
             job_list_height: 0,
             job_list_area: Rect::default(),
             job_output_area: Rect::default(),
+            help_viewport_height: 0,
             pending_input_event: None,
+            marked_jobs: HashSet::new(),
+            visual_anchor: None,
+            pending_yank: false,
+            status_message: None,
         }
     }
 }
@@ -301,6 +404,17 @@ impl App {
                 } else {
                     self.job_list_state.select_first();
                 }
+
+                // Drop selections of jobs that are no longer listed
+                let ids: HashSet<String> = self.jobs.iter().map(Job::id).collect();
+                self.marked_jobs.retain(|id| ids.contains(id));
+                if self
+                    .visual_anchor
+                    .as_ref()
+                    .is_some_and(|id| !ids.contains(id))
+                {
+                    self.visual_anchor = None;
+                }
             }
             AppMessage::JobOutput(content) => self.job_output = content,
             AppMessage::Key(key) => {
@@ -309,11 +423,12 @@ impl App {
                     let mut scancel_request = None;
                     let mut timelimit_request = None;
                     let mut command_failure = None;
+                    let mut command_executed = false;
 
                     match self.dialog.as_mut().expect("dialog must exist") {
-                        Dialog::ConfirmCancelJob(id) => match key.code {
+                        Dialog::ConfirmCancelJob(ids) => match key.code {
                             KeyCode::Enter | KeyCode::Char('y') => {
-                                scancel_request = Some((id.clone(), None));
+                                scancel_request = Some((ids.clone(), None));
                                 close_dialog = true;
                             }
                             KeyCode::Esc => {
@@ -322,7 +437,7 @@ impl App {
                             _ => {}
                         },
                         Dialog::SelectCancelSignal {
-                            id,
+                            ids,
                             selected_signal,
                         } => match key.code {
                             KeyCode::Up | KeyCode::Char('k') => {
@@ -336,7 +451,7 @@ impl App {
                             }
                             KeyCode::Enter => {
                                 scancel_request =
-                                    Some((id.clone(), Some(SCANCEL_SIGNALS[*selected_signal])));
+                                    Some((ids.clone(), Some(SCANCEL_SIGNALS[*selected_signal])));
                                 close_dialog = true;
                             }
                             KeyCode::Esc => {
@@ -351,10 +466,10 @@ impl App {
                             }
                             _ => {}
                         },
-                        Dialog::EditTimeLimit { id, input } => match key.code {
+                        Dialog::EditTimeLimit { ids, input } => match key.code {
                             KeyCode::Enter => {
                                 if let Some(time_limit) = validated_time_limit(input) {
-                                    timelimit_request = Some((id.clone(), time_limit));
+                                    timelimit_request = Some((ids.clone(), time_limit));
                                     close_dialog = true;
                                 }
                             }
@@ -365,6 +480,32 @@ impl App {
                                 input.handle_event(&Event::Key(key));
                             }
                         },
+                        Dialog::Help { scroll } => {
+                            let viewport = self.help_viewport_height.max(1);
+                            let max_scroll = (help_lines().len() as u16).saturating_sub(viewport);
+                            let page = viewport.saturating_sub(1).max(1);
+                            *scroll = min(*scroll, max_scroll);
+                            match key.code {
+                                KeyCode::Enter | KeyCode::Esc | KeyCode::Char('?') => {
+                                    close_dialog = true;
+                                }
+                                KeyCode::Char('j') | KeyCode::Down => {
+                                    *scroll = min(scroll.saturating_add(1), max_scroll);
+                                }
+                                KeyCode::Char('k') | KeyCode::Up => {
+                                    *scroll = scroll.saturating_sub(1);
+                                }
+                                KeyCode::PageDown => {
+                                    *scroll = min(scroll.saturating_add(page), max_scroll);
+                                }
+                                KeyCode::PageUp => {
+                                    *scroll = scroll.saturating_sub(page);
+                                }
+                                KeyCode::Char('g') | KeyCode::Home => *scroll = 0,
+                                KeyCode::Char('G') | KeyCode::End => *scroll = max_scroll,
+                                _ => {}
+                            }
+                        }
                         Dialog::CommandError { .. } => match key.code {
                             KeyCode::Enter | KeyCode::Esc => {
                                 close_dialog = true;
@@ -373,18 +514,35 @@ impl App {
                         },
                     };
 
-                    if let Some((id, signal)) = scancel_request {
-                        command_failure = execute_scancel(&id, signal).err();
+                    if let Some((ids, signal)) = scancel_request {
+                        command_failure = execute_scancel(&ids, signal).err();
+                        command_executed = true;
                     }
-                    if let Some((id, time_limit)) = timelimit_request {
-                        command_failure = execute_scontrol_update_timelimit(&id, &time_limit).err();
+                    if let Some((ids, time_limit)) = timelimit_request {
+                        command_failure =
+                            execute_scontrol_update_timelimit(&ids, &time_limit).err();
+                        command_executed = true;
                     }
                     if let Some(CommandFailure { command, output }) = command_failure {
                         self.dialog = Some(Dialog::CommandError { command, output });
-                    } else if close_dialog {
-                        self.dialog = None;
+                    } else {
+                        if command_executed {
+                            self.clear_selection();
+                        }
+                        if close_dialog {
+                            self.dialog = None;
+                        }
+                    }
+                } else if std::mem::take(&mut self.pending_yank) {
+                    self.status_message = None;
+                    match key.code {
+                        KeyCode::Char('j') => self.copy_to_clipboard(CopyTarget::JobId),
+                        KeyCode::Char('o') => self.copy_to_clipboard(CopyTarget::Stdout),
+                        KeyCode::Char('e') => self.copy_to_clipboard(CopyTarget::Stderr),
+                        _ => {}
                     }
                 } else {
+                    self.status_message = None;
                     match key.code {
                         KeyCode::Char('h') | KeyCode::Left => self.focus_previous_panel(),
                         KeyCode::Char('l') | KeyCode::Right => self.focus_next_panel(),
@@ -452,23 +610,33 @@ impl App {
                             self.job_output_offset = 0;
                             self.job_output_anchor = ScrollAnchor::Bottom;
                         }
+                        KeyCode::Char('?') => self.dialog = Some(Dialog::Help { scroll: 0 }),
+                        KeyCode::Char(' ') => self.toggle_mark(),
+                        KeyCode::Char('v') => self.toggle_visual_mode(),
+                        KeyCode::Esc => self.clear_selection(),
+                        KeyCode::Char('y') => self.pending_yank = !self.jobs.is_empty(),
+                        KeyCode::Char('H') => self.hold_or_release(HoldAction::Hold),
+                        KeyCode::Char('R') => self.hold_or_release(HoldAction::Release),
                         KeyCode::Char('c') => {
-                            if let Some(id) = self.selected_job_id() {
-                                self.dialog = Some(Dialog::ConfirmCancelJob(id));
+                            let ids = self.target_job_ids();
+                            if !ids.is_empty() {
+                                self.dialog = Some(Dialog::ConfirmCancelJob(ids));
                             }
                         }
                         KeyCode::Char('C') => {
-                            if let Some(id) = self.selected_job_id() {
+                            let ids = self.target_job_ids();
+                            if !ids.is_empty() {
                                 self.dialog = Some(Dialog::SelectCancelSignal {
-                                    id,
+                                    ids,
                                     selected_signal: 0,
                                 });
                             }
                         }
                         KeyCode::Char('t') => {
-                            if let Some(job) = self.selected_job() {
+                            let ids = self.target_job_ids();
+                            if let Some(job) = self.selected_job().filter(|_| !ids.is_empty()) {
                                 self.dialog = Some(Dialog::EditTimeLimit {
-                                    id: job.id(),
+                                    ids,
                                     input: Input::new(job.time_limit.clone()),
                                 });
                             }
@@ -540,33 +708,44 @@ impl App {
             .split(master_detail[1]);
 
         // Help
-        let help_options = vec![
-            ("q", "quit"),
-            ("⏶/⏷", "navigate"),
-            ("pgup/pgdown", "scroll"),
-            ("home/end", "top/bottom"),
-            ("esc", "cancel"),
-            ("enter", "confirm"),
-            ("c/C", "cancel/signal"),
-            ("t", "set time limit"),
-            ("o", "toggle stdout/stderr"),
-            ("w", "toggle text wrap"),
-        ];
+        let help_options = if self.pending_yank {
+            vec![
+                ("y", "copy…"),
+                ("j", "job id"),
+                ("o", "stdout path"),
+                ("e", "stderr path"),
+                ("esc", "abort"),
+            ]
+        } else {
+            vec![
+                ("?", "help"),
+                ("q", "quit"),
+                ("space/v", "select"),
+                ("c/C", "cancel/signal"),
+                ("H/R", "hold/release"),
+                ("t", "time limit"),
+                ("y", "copy"),
+                ("o", "stdout/stderr"),
+            ]
+        };
         let blue_style = Style::default().fg(Color::Blue);
         let light_blue_style = Style::default().fg(Color::LightBlue);
 
-        let help = Line::from(help_options.iter().fold(
-            Vec::new(),
-            |mut acc, (key, description)| {
-                if !acc.is_empty() {
-                    acc.push(Span::raw(" | "));
-                }
-                acc.push(Span::styled(*key, blue_style));
-                acc.push(Span::raw(": "));
-                acc.push(Span::styled(*description, light_blue_style));
-                acc
-            },
-        ));
+        let help = match &self.status_message {
+            Some(message) => Line::from(Span::styled(message.as_str(), light_blue_style)),
+            None => Line::from(help_options.iter().fold(
+                Vec::new(),
+                |mut acc, (key, description)| {
+                    if !acc.is_empty() {
+                        acc.push(Span::raw(" | "));
+                    }
+                    acc.push(Span::styled(*key, blue_style));
+                    acc.push(Span::raw(": "));
+                    acc.push(Span::styled(*description, light_blue_style));
+                    acc
+                },
+            )),
+        };
 
         let help = Paragraph::new(help);
         f.render_widget(help, content_help[1]);
@@ -587,10 +766,19 @@ impl App {
             .map(|j| j.state_compact.len())
             .max()
             .unwrap_or(0);
+        let visual_range = self.visual_range();
         let jobs: Vec<ListItem> = self
             .jobs
             .iter()
-            .map(|j| {
+            .enumerate()
+            .map(|(i, j)| {
+                let is_selected = self.marked_jobs.contains(&j.id())
+                    || visual_range.as_ref().is_some_and(|r| r.contains(&i));
+                let item_style = if is_selected {
+                    Style::default().bg(Color::DarkGray)
+                } else {
+                    Style::default()
+                };
                 ListItem::new(Line::from(vec![
                     Span::styled(
                         format!(
@@ -623,12 +811,19 @@ impl App {
                     Span::raw(" "),
                     Span::raw(&j.name),
                 ]))
+                .style(item_style)
             })
             .collect();
+        let selection_count = self.selected_jobs().len();
+        let job_list_title = match (self.visual_anchor.is_some(), selection_count) {
+            (true, n) => format!("─Jobs ({}) ─VISUAL ({n})", self.jobs.len()),
+            (false, 0) => format!("─Jobs ({})", self.jobs.len()),
+            (false, n) => format!("─Jobs ({}) ─{n} selected", self.jobs.len()),
+        };
         let job_list = List::new(jobs)
             .block(
                 Block::default()
-                    .title(format!("─Jobs ({})", self.jobs.len()))
+                    .title(job_list_title)
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
                     .border_style(if self.dialog.is_some() {
@@ -769,12 +964,18 @@ impl App {
 
         f.render_widget(log, log_area);
 
+        let help_height = (help_lines().len() as u16).saturating_add(2);
+        self.help_viewport_height = dialog_area(help_height, f.area()).height.saturating_sub(2);
+
         if let Some(dialog) = &self.dialog {
             match dialog {
-                Dialog::ConfirmCancelJob(id) => {
+                Dialog::ConfirmCancelJob(ids) => {
                     let content = Text::from(Line::from(vec![
-                        Span::raw("Cancel job "),
-                        Span::styled(id, Style::default().add_modifier(Modifier::BOLD)),
+                        Span::raw("Cancel "),
+                        Span::styled(
+                            describe_jobs(ids),
+                            Style::default().add_modifier(Modifier::BOLD),
+                        ),
                         Span::raw("?"),
                     ]));
 
@@ -788,13 +989,16 @@ impl App {
                     );
                 }
                 Dialog::SelectCancelSignal {
-                    id,
+                    ids,
                     selected_signal,
                 } => {
                     let mut rows = vec![
                         Line::from(vec![
-                            Span::raw("Send signal to job "),
-                            Span::styled(id, Style::default().add_modifier(Modifier::BOLD)),
+                            Span::raw("Send signal to "),
+                            Span::styled(
+                                describe_jobs(ids),
+                                Style::default().add_modifier(Modifier::BOLD),
+                            ),
                             Span::raw(":"),
                         ]),
                         Line::default(),
@@ -822,11 +1026,12 @@ impl App {
                         Some(Wrap { trim: true }),
                     );
                 }
-                Dialog::EditTimeLimit { id, input } => {
+                Dialog::EditTimeLimit { ids, input } => {
                     let area = dialog_area(3, f.area());
                     let inner = Block::default().borders(Borders::ALL).inner(area);
 
-                    let prompt_prefix = "Set time limit for job ";
+                    let id = &describe_jobs(ids);
+                    let prompt_prefix = "Set time limit for ";
                     let prompt_suffix = ": ";
                     let prompt_width = (prompt_prefix.chars().count()
                         + id.chars().count()
@@ -858,6 +1063,25 @@ impl App {
                     let cursor_y = inner.y;
                     f.set_cursor_position((cursor_x, cursor_y));
                 }
+                Dialog::Help { scroll } => {
+                    let lines = help_lines();
+                    let max_scroll = (lines.len() as u16).saturating_sub(self.help_viewport_height);
+                    let scroll = min(*scroll, max_scroll);
+                    let title = if max_scroll > 0 {
+                        format!(
+                            "Help [{}-{}/{}] (j/k, pgup/pgdown to scroll)",
+                            scroll + 1,
+                            scroll + self.help_viewport_height,
+                            lines.len()
+                        )
+                    } else {
+                        "Help".to_string()
+                    };
+                    let content =
+                        Text::from(lines.into_iter().skip(scroll as usize).collect::<Vec<_>>());
+
+                    render_dialog(f, &title, Color::Green, help_height, content, None);
+                }
                 Dialog::CommandError { command, output } => {
                     let dialog_text = format!("Command: {command}\n\n{output}");
                     let lines = dialog_text
@@ -879,6 +1103,36 @@ impl App {
             }
         }
     }
+}
+
+/// Lines of the help dialog, built from `KEYMAPS`.
+fn help_lines() -> Vec<Line<'static>> {
+    let key_width = KEYMAPS
+        .iter()
+        .flat_map(|(_, keys)| keys.iter())
+        .map(|(key, _)| key.chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut lines = Vec::new();
+    for (i, (section, keys)) in KEYMAPS.iter().enumerate() {
+        if i > 0 {
+            lines.push(Line::default());
+        }
+        lines.push(Line::from(Span::styled(
+            *section,
+            Style::default().fg(Color::Yellow),
+        )));
+        lines.extend(keys.iter().map(|(key, description)| {
+            Line::from(vec![
+                Span::styled(
+                    format!("  {key:<key_width$}  "),
+                    Style::default().fg(Color::Blue),
+                ),
+                Span::raw(*description),
+            ])
+        }));
+    }
+    lines
 }
 
 fn dialog_area(height: u16, viewport: Rect) -> Rect {
@@ -1018,8 +1272,121 @@ impl App {
             .and_then(|i| self.jobs.get(i))
     }
 
-    fn selected_job_id(&self) -> Option<String> {
-        self.selected_job().map(Job::id)
+    /// Index range covered by the visual selection, if visual mode is active.
+    fn visual_range(&self) -> Option<RangeInclusive<usize>> {
+        let anchor_id = self.visual_anchor.as_ref()?;
+        let anchor = self.jobs.iter().position(|j| &j.id() == anchor_id)?;
+        let cursor = self.job_list_state.selected()?.min(self.jobs.len() - 1);
+        Some(min(anchor, cursor)..=anchor.max(cursor))
+    }
+
+    /// Jobs that are marked or inside the visual range, in list order.
+    fn selected_jobs(&self) -> Vec<&Job> {
+        let visual_range = self.visual_range();
+        self.jobs
+            .iter()
+            .enumerate()
+            .filter(|(i, j)| {
+                self.marked_jobs.contains(&j.id())
+                    || visual_range.as_ref().is_some_and(|r| r.contains(i))
+            })
+            .map(|(_, j)| j)
+            .collect()
+    }
+
+    /// Jobs an action applies to: the selection if there is one, otherwise the job under the cursor.
+    fn target_jobs(&self) -> Vec<&Job> {
+        let selected = self.selected_jobs();
+        if selected.is_empty() {
+            self.selected_job().into_iter().collect()
+        } else {
+            selected
+        }
+    }
+
+    fn target_job_ids(&self) -> Vec<String> {
+        self.target_jobs().into_iter().map(Job::id).collect()
+    }
+
+    fn toggle_mark(&mut self) {
+        if self.visual_anchor.is_some() {
+            self.commit_visual_selection();
+        } else if let Some(id) = self.selected_job().map(Job::id) {
+            if !self.marked_jobs.remove(&id) {
+                self.marked_jobs.insert(id);
+            }
+        }
+    }
+
+    fn toggle_visual_mode(&mut self) {
+        if self.visual_anchor.is_some() {
+            self.commit_visual_selection();
+        } else {
+            self.visual_anchor = self.selected_job().map(Job::id);
+        }
+    }
+
+    /// Leave visual mode, keeping the visually selected jobs marked.
+    fn commit_visual_selection(&mut self) {
+        if let Some(range) = self.visual_range() {
+            let ids: Vec<String> = self.jobs[range].iter().map(Job::id).collect();
+            self.marked_jobs.extend(ids);
+        }
+        self.visual_anchor = None;
+    }
+
+    fn clear_selection(&mut self) {
+        self.marked_jobs.clear();
+        self.visual_anchor = None;
+    }
+
+    fn hold_or_release(&mut self, action: HoldAction) {
+        let ids = self.target_job_ids();
+        if ids.is_empty() {
+            return;
+        }
+        match execute_scontrol_hold(&ids, action) {
+            Ok(()) => {
+                self.status_message = Some(format!(
+                    "scontrol {} {}",
+                    action.subcommand(),
+                    describe_jobs(&ids)
+                ));
+                self.clear_selection();
+            }
+            Err(CommandFailure { command, output }) => {
+                self.dialog = Some(Dialog::CommandError { command, output });
+            }
+        }
+    }
+
+    fn copy_to_clipboard(&mut self, target: CopyTarget) {
+        let jobs = self.target_jobs();
+        if jobs.is_empty() {
+            return;
+        }
+        let (what, values): (&str, Vec<String>) = match target {
+            CopyTarget::JobId => ("job id", jobs.iter().map(|j| j.id()).collect()),
+            CopyTarget::Stdout => ("stdout path", paths(&jobs, |j| &j.stdout)),
+            CopyTarget::Stderr => ("stderr path", paths(&jobs, |j| &j.stderr)),
+        };
+        if values.is_empty() {
+            self.status_message = Some(format!("No {what} to copy"));
+            return;
+        }
+        // Ids are space separated so they can be pasted as command arguments, paths one per line
+        let separator = match target {
+            CopyTarget::JobId => " ",
+            CopyTarget::Stdout | CopyTarget::Stderr => "\n",
+        };
+        let text = values.join(separator);
+        self.status_message = Some(
+            match execute!(io::stdout(), CopyToClipboard::to_clipboard_from(&text)) {
+                Ok(()) if values.len() == 1 => format!("Copied {what}: {text}"),
+                Ok(()) => format!("Copied {} {what}s", values.len()),
+                Err(e) => format!("Failed to copy {what}: {e}"),
+            },
+        );
     }
 
     fn focus_next_panel(&mut self) {
@@ -1129,7 +1496,29 @@ fn validated_time_limit(input: &Input) -> Option<String> {
     }
 }
 
-fn execute_scancel(job_id: &str, signal: Option<&str>) -> Result<(), CommandFailure> {
+fn paths(jobs: &[&Job], path: impl Fn(&Job) -> &Option<PathBuf>) -> Vec<String> {
+    jobs.iter()
+        .filter_map(|j| path(j).as_ref())
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect()
+}
+
+/// Human readable description of a set of jobs for dialogs, e.g. `job 42` or `3 jobs (1, 2, 3)`.
+fn describe_jobs(ids: &[String]) -> String {
+    const MAX_LISTED: usize = 3;
+    match ids {
+        [id] => format!("job {id}"),
+        _ => {
+            let mut listed = ids.iter().take(MAX_LISTED).cloned().collect::<Vec<_>>();
+            if ids.len() > MAX_LISTED {
+                listed.push("…".to_string());
+            }
+            format!("{} jobs ({})", ids.len(), listed.join(", "))
+        }
+    }
+}
+
+fn execute_scancel(job_ids: &[String], signal: Option<&str>) -> Result<(), CommandFailure> {
     let mut command = Command::new("scancel");
     let mut command_display = String::from("scancel");
 
@@ -1137,13 +1526,28 @@ fn execute_scancel(job_id: &str, signal: Option<&str>) -> Result<(), CommandFail
         command.arg("--signal").arg(signal);
         command_display.push_str(&format!(" --signal {signal}"));
     }
-    command.arg(job_id);
-    command_display.push_str(&format!(" {job_id}"));
+    command.args(job_ids);
+    command_display.push_str(&format!(" {}", job_ids.join(" ")));
 
     execute_command(command, command_display)
 }
 
-fn execute_scontrol_update_timelimit(job_id: &str, time_limit: &str) -> Result<(), CommandFailure> {
+fn execute_scontrol_hold(job_ids: &[String], action: HoldAction) -> Result<(), CommandFailure> {
+    let job_list = job_ids.join(",");
+    let mut command = Command::new("scontrol");
+    command.arg(action.subcommand()).arg(&job_list);
+
+    execute_command(
+        command,
+        format!("scontrol {} {job_list}", action.subcommand()),
+    )
+}
+
+fn execute_scontrol_update_timelimit(
+    job_ids: &[String],
+    time_limit: &str,
+) -> Result<(), CommandFailure> {
+    let job_id = job_ids.join(",");
     let mut command = Command::new("scontrol");
     command
         .arg("update")
@@ -1243,6 +1647,17 @@ mod tests {
         let input = "123456789";
         let expected = vec!["123456789"];
         assert_eq!(chunked_string(input, 0, 0), expected);
+    }
+
+    #[test]
+    fn test_describe_jobs() {
+        let ids = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(describe_jobs(&ids(&["42"])), "job 42");
+        assert_eq!(describe_jobs(&ids(&["1", "2"])), "2 jobs (1, 2)");
+        assert_eq!(
+            describe_jobs(&ids(&["1", "2", "3", "4_5"])),
+            "4 jobs (1, 2, 3, …)"
+        );
     }
 
     #[test]

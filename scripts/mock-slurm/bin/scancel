@@ -9,7 +9,7 @@ log_file="$log_dir/scancel.log"
 mkdir -p "$log_dir"
 
 timestamp="$(date '+%Y-%m-%d %H:%M:%S')"
-job_id="unknown"
+job_ids=()
 signal=""
 
 while (($#)); do
@@ -26,11 +26,13 @@ while (($#)); do
         shift
         ;;
     *)
-        job_id="$1"
+        job_ids+=("$1")
         shift
         ;;
     esac
 done
+
+job_id="${job_ids[*]:-unknown}"
 
 if [[ -n "$signal" ]]; then
     printf '[%s] canceled %s with signal %s\n' "$timestamp" "$job_id" "$signal" >>"$log_file"

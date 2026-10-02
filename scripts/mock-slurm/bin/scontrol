@@ -12,6 +12,11 @@ timestamp="$(date '+%Y-%m-%d %H:%M:%S')"
 job_id=""
 time_limit=""
 
+if [[ "${1:-}" == "hold" || "${1:-}" == "release" ]]; then
+    printf '[%s] %s %s\n' "$timestamp" "$1" "${2:-}" >>"$log_file"
+    exit 0
+fi
+
 if [[ "${1:-}" == "update" ]]; then
     shift
 fi
