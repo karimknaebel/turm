@@ -1,12 +1,14 @@
 use crossbeam::{
-    channel::{Receiver, TryRecvError, unbounded},
+    channel::{Receiver, TryRecvError, bounded, unbounded},
     select,
 };
 use itertools::Either;
-use std::{cmp::min, iter::once, path::PathBuf, process::Command, time::Duration};
+use std::{cmp::min, iter::once, path::PathBuf, process::Command, thread, time::Duration};
 
 use crate::file_watcher::{FileWatcherError, FileWatcherHandle};
+use crate::input::{Input as TerminalInput, PAGER_KEY};
 use crate::job_watcher::JobWatcherHandle;
+use crate::pager::PagerChild;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, MouseButton, MouseEventKind};
 use ratatui::{
@@ -29,6 +31,11 @@ pub enum Dialog {
     SelectCancelSignal { id: String, selected_signal: usize },
     EditTimeLimit { id: String, input: Input },
     CommandError { command: String, output: String },
+}
+
+pub enum AppExit {
+    Quit,
+    OpenPager(PathBuf),
 }
 
 struct CommandFailure {
@@ -62,12 +69,13 @@ pub struct App {
     job_output_watcher: FileWatcherHandle,
     // sender: Sender<AppMessage>,
     receiver: Receiver<AppMessage>,
-    input_receiver: Receiver<std::io::Result<Event>>,
+    input: TerminalInput,
     output_file_view: OutputFileView,
     job_list_height: u16,
     job_list_area: Rect,
     job_output_area: Rect,
     pending_input_event: Option<Event>,
+    pager_path: Option<PathBuf>,
 }
 
 pub struct Job {
@@ -127,12 +135,7 @@ const SCANCEL_SIGNALS: &[&str] = &["TERM", "INT", "HUP", "USR1", "USR2", "STOP",
 const DIALOG_WIDTH: u16 = 80;
 
 impl App {
-    pub fn new(
-        input_receiver: Receiver<std::io::Result<Event>>,
-        slurm_refresh_rate: u64,
-        file_refresh_rate: u64,
-        squeue_args: Vec<String>,
-    ) -> App {
+    pub fn new(slurm_refresh_rate: u64, file_refresh_rate: u64, squeue_args: Vec<String>) -> App {
         let (sender, receiver) = unbounded();
         Self {
             focus: Focus::Jobs,
@@ -154,12 +157,13 @@ impl App {
             ),
             // sender,
             receiver,
-            input_receiver,
+            input: TerminalInput::new(),
             output_file_view: OutputFileView::default(),
             job_list_height: 0,
             job_list_area: Rect::default(),
             job_output_area: Rect::default(),
             pending_input_event: None,
+            pager_path: None,
         }
     }
 }
@@ -168,7 +172,7 @@ impl App {
     pub fn run<B: Backend<Error = io::Error>>(
         &mut self,
         terminal: &mut Terminal<B>,
-    ) -> io::Result<()> {
+    ) -> io::Result<AppExit> {
         terminal.draw(|f| self.ui(f))?;
 
         loop {
@@ -180,17 +184,43 @@ impl App {
                         self.handle(event.unwrap());
                         (false, true)
                     }
-                    recv(self.input_receiver) -> input_res => {
+                    recv(self.input.receiver) -> input_res => {
                         self.handle_input_event(input_res.unwrap().unwrap())
                     }
                 }
             };
             if should_quit {
-                return Ok(());
+                return Ok(AppExit::Quit);
+            }
+            if let Some(path) = self.pager_path.take() {
+                return Ok(AppExit::OpenPager(path));
             }
 
             if should_draw {
                 terminal.draw(|f| self.ui(f))?;
+            }
+        }
+    }
+
+    pub fn resume_input(&self) {
+        self.input.resume();
+    }
+
+    pub fn show_dialog(&mut self, dialog: Dialog) {
+        self.dialog = Some(dialog);
+    }
+
+    pub fn wait_for_pager(&mut self, child: PagerChild) -> io::Result<()> {
+        let (sender, receiver) = bounded(1);
+        thread::spawn(move || {
+            let _ = sender.send(child.wait());
+        });
+        loop {
+            select! {
+                recv(receiver) -> result => {
+                    return result.unwrap();
+                }
+                recv(self.receiver) -> message => self.handle(message.unwrap()),
             }
         }
     }
@@ -201,7 +231,7 @@ impl App {
         }
 
         loop {
-            match self.input_receiver.try_recv() {
+            match self.input.receiver.try_recv() {
                 Ok(Ok(event)) => return Some(event),
                 Ok(Err(_)) => continue,
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => return None,
@@ -216,6 +246,9 @@ impl App {
                     return (true, false);
                 }
                 self.handle(AppMessage::Key(key));
+                if key.code == PAGER_KEY && self.pager_path.is_none() {
+                    self.input.resume();
+                }
                 (false, true)
             }
             Event::Paste(_) => (false, false),
@@ -482,6 +515,9 @@ impl App {
                         KeyCode::Char('w') => {
                             self.job_output_wrap = !self.job_output_wrap;
                         }
+                        PAGER_KEY => {
+                            self.pager_path = self.selected_log_path().cloned();
+                        }
                         _ => {}
                     };
                 }
@@ -513,12 +549,7 @@ impl App {
 
         // update
         self.job_output_watcher
-            .set_file_path(self.job_list_state.selected().and_then(|i| {
-                self.jobs.get(i).and_then(|j| match self.output_file_view {
-                    OutputFileView::Stdout => j.stdout.clone(),
-                    OutputFileView::Stderr => j.stderr.clone(),
-                })
-            }));
+            .set_file_path(self.selected_log_path().cloned());
     }
 
     fn ui(&mut self, f: &mut Frame) {
@@ -551,6 +582,7 @@ impl App {
             ("t", "set time limit"),
             ("o", "toggle stdout/stderr"),
             ("w", "toggle text wrap"),
+            ("p", "open in pager"),
         ];
         let blue_style = Style::default().fg(Color::Blue);
         let light_blue_style = Style::default().fg(Color::LightBlue);
@@ -1020,6 +1052,14 @@ impl App {
 
     fn selected_job_id(&self) -> Option<String> {
         self.selected_job().map(Job::id)
+    }
+
+    fn selected_log_path(&self) -> Option<&PathBuf> {
+        self.selected_job()
+            .and_then(|job| match self.output_file_view {
+                OutputFileView::Stdout => job.stdout.as_ref(),
+                OutputFileView::Stderr => job.stderr.as_ref(),
+            })
     }
 
     fn focus_next_panel(&mut self) {

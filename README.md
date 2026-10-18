@@ -62,6 +62,10 @@ In your `config.fish` or in a separate `completions/turm.fish` file, add the fol
 turm completion fish | source
 ```
 
+## Open in external pager
+
+When pressing <kbd>p</kdb> to open the log in an external pager, the command is chosen in this order: `--pager`, `$TURM_PAGER`, `$PAGER`, then `less` (or `more` if `less` is not installed).
+
 ## How it works
 
 `turm` obtains information about jobs by parsing the output of `squeue`.

@@ -1,30 +1,31 @@
 mod app;
 mod file_watcher;
+mod input;
 mod job_watcher;
+mod pager;
 mod squeue_args;
 
-use app::App;
+use app::{App, AppExit, Dialog};
 use clap::CommandFactory;
 use clap::Parser;
 use clap::Subcommand;
 use clap_complete::{Shell, generate};
-use crossbeam::channel::{Sender, unbounded};
 use crossterm::{
     cursor::Show,
-    event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event,
-    },
+    event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{
-    Terminal,
-    backend::{Backend, CrosstermBackend},
-};
+use pager::Pager;
+use ratatui::{Terminal, backend::CrosstermBackend};
+use signal_hook::consts::{SIGINT, SIGQUIT};
 use squeue_args::SqueueArgs;
 use std::io::Write;
-use std::{io, panic, thread};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::{env, io, panic};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -36,6 +37,10 @@ struct Cli {
     /// Refresh rate for the file watcher.
     #[arg(long, value_name = "SECONDS", default_value_t = 2)]
     file_refresh: u64,
+
+    /// Log viewer command (defaults to TURM_PAGER, PAGER, then less or more).
+    #[arg(long, value_name = "COMMAND")]
+    pager: Option<String>,
 
     /// squeue arguments
     #[command(flatten)]
@@ -67,8 +72,15 @@ fn main() -> io::Result<()> {
 
     install_panic_hook();
 
+    let keyboard_signals_default = Arc::new(AtomicBool::new(true));
+    for signal in [SIGINT, SIGQUIT] {
+        signal_hook::flag::register_conditional_default(
+            signal,
+            Arc::clone(&keyboard_signals_default),
+        )?;
+    }
     let mut terminal_guard = TerminalGuard::new(io::stdout())?;
-    run_app(terminal_guard.terminal_mut(), args)
+    run_app(&mut terminal_guard, args, &keyboard_signals_default)
 }
 
 fn install_panic_hook() {
@@ -107,33 +119,71 @@ impl<W: Write> TerminalGuard<W> {
     fn terminal_mut(&mut self) -> &mut Terminal<CrosstermBackend<W>> {
         &mut self.terminal
     }
-}
 
-impl<W: Write> Drop for TerminalGuard<W> {
-    fn drop(&mut self) {
-        let _ = disable_raw_mode();
-        let _ = execute!(
+    fn suspend(&mut self) -> io::Result<()> {
+        disable_raw_mode()?;
+        execute!(
             self.terminal.backend_mut(),
             LeaveAlternateScreen,
             DisableBracketedPaste,
             DisableMouseCapture
-        );
-        let _ = self.terminal.show_cursor();
+        )?;
+        self.terminal.show_cursor()
+    }
+
+    fn resume(&mut self) -> io::Result<()> {
+        enable_raw_mode()?;
+        execute!(
+            self.terminal.backend_mut(),
+            EnterAlternateScreen,
+            EnableBracketedPaste,
+            EnableMouseCapture
+        )?;
+        self.terminal.clear()
     }
 }
 
-fn input_loop(tx: Sender<std::io::Result<Event>>) {
-    while tx.send(event::read()).is_ok() {}
+impl<W: Write> Drop for TerminalGuard<W> {
+    fn drop(&mut self) {
+        let _ = self.suspend();
+    }
 }
 
-fn run_app<B: Backend<Error = io::Error>>(terminal: &mut Terminal<B>, args: Cli) -> io::Result<()> {
-    let (input_tx, input_rx) = unbounded();
+fn run_app<W: Write>(
+    terminal: &mut TerminalGuard<W>,
+    args: Cli,
+    keyboard_signals_default: &AtomicBool,
+) -> io::Result<()> {
+    let pager = Pager::new(
+        args.pager,
+        env::var("TURM_PAGER").ok(),
+        env::var("PAGER").ok(),
+    );
     let mut app = App::new(
-        input_rx,
         args.slurm_refresh,
         args.file_refresh,
         args.squeue_args.to_vec(),
     );
-    thread::spawn(move || input_loop(input_tx));
-    app.run(terminal)
+    loop {
+        match app.run(terminal.terminal_mut())? {
+            AppExit::Quit => return Ok(()),
+            AppExit::OpenPager(path) => {
+                // Caught handlers reset on exec, so the pager receives these signals normally.
+                keyboard_signals_default.store(false, Ordering::SeqCst);
+                terminal.suspend()?;
+                let result = pager
+                    .spawn(&path)
+                    .and_then(|child| app.wait_for_pager(child));
+                terminal.resume()?;
+                keyboard_signals_default.store(true, Ordering::SeqCst);
+                app.resume_input();
+                if let Err(error) = result {
+                    app.show_dialog(Dialog::CommandError {
+                        command: pager.command.clone(),
+                        output: error.to_string(),
+                    });
+                }
+            }
+        }
+    }
 }
