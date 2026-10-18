@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.0](https://github.com/karimknaebel/turm/compare/v0.14.0...v0.15.0) (2026-10-18)
+
+
+### Features
+
+* add support for opening logs in an external pager ([688a48f](https://github.com/karimknaebel/turm/commit/688a48f411b91e525323baeee6d2388c94545dd8))
+
 ## [0.14.0](https://github.com/karimknaebel/turm/compare/v0.13.1...v0.14.0) (2026-03-07)
 
 
