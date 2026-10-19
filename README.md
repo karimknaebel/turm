@@ -64,20 +64,14 @@ turm completion fish | source
 
 ## Panel sizes
 
-Use `--jobs-width PERCENT` to set the initial Jobs pane width as a percentage
-(default: 30), or `--jobs-cols COLS` to set its content columns, excluding borders
-(0 hides it).
-These options are mutually exclusive and can also be set with `TURM_JOBS_WIDTH`
-and `TURM_JOBS_COLS`. In column mode, the configured width and subsequent drag
-adjustments stay fixed when the window resizes, limited by the available space.
+- `--jobs-width SIZE` / `TURM_JOBS_WIDTH`: Jobs width in content columns (e.g. `40`)
+  or a percentage of the window (e.g. `25%`). Default: `30%`.
+- `--details-height LINES` / `TURM_DETAILS_HEIGHT`: Details height in content
+  lines, from `0` to `6`. Default: `6`.
 
-Use `--details-lines LINES` (or `TURM_DETAILS_LINES`) to show 0–6 lines of Details
-content, excluding borders (default: 6). Set `--details-lines 0` to start with
-Details hidden.
-
-Drag the panel borders to resize them, or double-click a divider to restore its
-configured size. When Details is hidden, drag the log pane's top border down to
-reopen it.
+Content sizes exclude borders. Set either size to `0` to hide the pane.
+Drag panel borders to resize, or double-click a divider to restore its configured
+size.
 
 ## Open in external pager
 

@@ -3,9 +3,10 @@ mod file_watcher;
 mod input;
 mod job_watcher;
 mod pager;
+mod panel_size;
 mod squeue_args;
 
-use app::{App, AppExit, Dialog, JobsWidth};
+use app::{App, AppExit, Dialog};
 use clap::CommandFactory;
 use clap::Parser;
 use clap::Subcommand;
@@ -17,6 +18,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use pager::Pager;
+use panel_size::PanelSize;
 use ratatui::{Terminal, backend::CrosstermBackend};
 use signal_hook::consts::{SIGINT, SIGQUIT};
 use squeue_args::SqueueArgs;
@@ -48,30 +50,24 @@ struct Cli {
     )]
     file_refresh: u64,
 
-    /// Initial Jobs pane width as a percentage (0-100).
+    /// Initial Jobs pane width: content columns (excluding borders) or a percentage (0 hides it).
     #[arg(
         long,
         env = "TURM_JOBS_WIDTH",
-        value_name = "PERCENT",
-        default_value_t = 30,
-        conflicts_with = "jobs_cols",
-        value_parser = clap::value_parser!(u16).range(0..=100)
+        value_name = "COLS|PERCENT%",
+        default_value = "30%"
     )]
-    jobs_width: u16,
+    jobs_width: PanelSize,
 
-    /// Initial Jobs pane content columns, excluding borders (0 hides it). Fixed on window resize.
-    #[arg(long, env = "TURM_JOBS_COLS", value_name = "COLS")]
-    jobs_cols: Option<u16>,
-
-    /// Initial Details pane content lines, excluding borders (0 hides it).
+    /// Initial Details pane height in content lines, excluding borders (0-6, 0 hides it).
     #[arg(
         long,
-        env = "TURM_DETAILS_LINES",
+        env = "TURM_DETAILS_HEIGHT",
         value_name = "LINES",
         default_value_t = app::MAX_DETAILS_LINES,
         value_parser = clap::value_parser!(u16).range(0..=i64::from(app::MAX_DETAILS_LINES))
     )]
-    details_lines: u16,
+    details_height: u16,
 
     /// Log viewer command (falls back to PAGER, then less or more).
     #[arg(long, env = "TURM_PAGER", value_name = "COMMAND")]
@@ -194,10 +190,8 @@ fn run_app<W: Write>(
         args.slurm_refresh,
         args.file_refresh,
         args.squeue_args.to_vec(),
-        args.jobs_cols
-            .map(JobsWidth::Cols)
-            .unwrap_or(JobsWidth::Ratio(args.jobs_width, 100)),
-        args.details_lines,
+        args.jobs_width,
+        args.details_height,
     );
     loop {
         match app.run(terminal.terminal_mut())? {
@@ -226,40 +220,63 @@ fn run_app<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::{FromArgMatches, error::ErrorKind};
+    use clap::FromArgMatches;
 
     #[test]
-    fn jobs_width_options() {
+    fn panel_size_options() {
         let command = Cli::command()
             .mut_arg("jobs_width", |arg| arg.env(None::<&str>))
-            .mut_arg("jobs_cols", |arg| arg.env(None::<&str>));
-        for (args, width, cols) in [
-            (vec!["turm"], 30, None),
-            (vec!["turm", "--jobs-width", "45"], 45, None),
-            (vec!["turm", "--jobs-cols", "45"], 30, Some(45)),
-            (vec!["turm", "--jobs-cols", "0"], 30, Some(0)),
-            (vec!["turm", "--jobs-cols", "65535"], 30, Some(u16::MAX)),
-        ] {
-            let cli = Cli::from_arg_matches(&command.clone().try_get_matches_from(args).unwrap())
+            .mut_arg("details_height", |arg| arg.env(None::<&str>));
+        let defaults =
+            Cli::from_arg_matches(&command.clone().try_get_matches_from(["turm"]).unwrap())
                 .unwrap();
-            assert_eq!(cli.jobs_width, width);
-            assert_eq!(cli.jobs_cols, cols);
+        assert_eq!(defaults.jobs_width, PanelSize::Ratio(30, 100));
+        assert_eq!(defaults.details_height, 6);
+
+        for (value, size) in [
+            ("40", PanelSize::Content(40)),
+            ("25%", PanelSize::Ratio(25, 100)),
+            ("0", PanelSize::Content(0)),
+            ("0%", PanelSize::Ratio(0, 100)),
+            ("100%", PanelSize::Ratio(100, 100)),
+            ("65535", PanelSize::Content(u16::MAX)),
+        ] {
+            let cli = Cli::from_arg_matches(
+                &command
+                    .clone()
+                    .try_get_matches_from(["turm", "--jobs-width", value])
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(cli.jobs_width, size);
         }
-        assert_eq!(
-            command
-                .clone()
-                .try_get_matches_from(["turm", "--jobs-width", "30", "--jobs-cols", "45"])
-                .unwrap_err()
-                .kind(),
-            ErrorKind::ArgumentConflict,
-        );
-        for value in ["-1", "65536", "abc"] {
+        for height in 0..=6 {
+            let cli = Cli::from_arg_matches(
+                &command
+                    .clone()
+                    .try_get_matches_from(["turm", "--details-height", &height.to_string()])
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(cli.details_height, height);
+        }
+        for value in ["7", "65535", "0%", "25%", "100%"] {
             assert!(
                 command
                     .clone()
-                    .try_get_matches_from(["turm", "--jobs-cols", value])
+                    .try_get_matches_from(["turm", "--details-height", value])
                     .is_err()
             );
+        }
+        for flag in ["--jobs-width", "--details-height"] {
+            for value in ["", "-1", "65536", "abc", "%", "101%", "-1%", "2.5%", "25%%"] {
+                assert!(
+                    command
+                        .clone()
+                        .try_get_matches_from(["turm", flag, value])
+                        .is_err()
+                );
+            }
         }
     }
 }

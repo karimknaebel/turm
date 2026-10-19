@@ -16,6 +16,7 @@ use crate::file_watcher::{FileWatcherError, FileWatcherHandle};
 use crate::input::{Input as TerminalInput, PAGER_KEY};
 use crate::job_watcher::JobWatcherHandle;
 use crate::pager::PagerChild;
+use crate::panel_size::PanelSize;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
@@ -143,7 +144,7 @@ pub(crate) enum MouseScrollTarget {
 
 const SCANCEL_SIGNALS: &[&str] = &["TERM", "INT", "HUP", "USR1", "USR2", "STOP", "CONT", "KILL"];
 const DIALOG_WIDTH: u16 = 80;
-const MIN_PANEL_WIDTH: u16 = 3;
+const MIN_PANEL_SIZE: u16 = 3;
 pub(crate) const MAX_DETAILS_LINES: u16 = 6;
 const MAX_DETAILS_HEIGHT: u16 = MAX_DETAILS_LINES + 2;
 
@@ -152,8 +153,8 @@ impl App {
         slurm_refresh_rate: u64,
         file_refresh_rate: u64,
         squeue_args: Vec<String>,
-        jobs_width: JobsWidth,
-        details_lines: u16,
+        jobs_width: PanelSize,
+        details_height: u16,
     ) -> App {
         let (sender, receiver) = unbounded();
         Self {
@@ -187,10 +188,10 @@ impl App {
                 ..PanelSplit::default()
             },
             details_split: DetailsSplit {
-                initial_height: Some(if details_lines == 0 {
+                initial_height: Some(if details_height == 0 {
                     0
                 } else {
-                    details_lines + 2
+                    details_height + 2
                 }),
                 ..DetailsSplit::default()
             },
@@ -1205,16 +1206,10 @@ fn rect_contains(rect: Rect, column: u16, row: u16) -> bool {
         && row < rect.y.saturating_add(rect.height)
 }
 
-#[derive(Clone, Copy)]
-pub enum JobsWidth {
-    Ratio(u16, u16),
-    Cols(u16),
-}
-
 #[derive(Default)]
 struct PanelSplit {
-    initial_width: Option<JobsWidth>,
-    width: Option<JobsWidth>,
+    initial_width: Option<PanelSize>,
+    width: Option<PanelSize>,
     drag: Option<PanelDrag>,
     last_click: Option<(Instant, u16, u16)>,
 }
@@ -1225,30 +1220,18 @@ struct PanelDrag {
 }
 
 impl PanelSplit {
-    fn areas(&self, mut area: Rect) -> [Rect; 2] {
-        if area.width < MIN_PANEL_WIDTH {
-            area.width = 0;
-        }
-        let jobs_width = match self
-            .width
-            .or(self.initial_width)
-            .unwrap_or(JobsWidth::Ratio(30, 100))
-        {
-            JobsWidth::Ratio(width, total) => {
-                (u32::from(width) * u32::from(area.width)).div_ceil(u32::from(total)) as u16
-            }
-            JobsWidth::Cols(0) => 0,
-            JobsWidth::Cols(cols) => cols.saturating_add(2).min(area.width),
-        };
-        let jobs_width = snap_panel_width(jobs_width, area.width);
+    fn areas(&self, area: Rect) -> [Rect; 2] {
+        let [jobs_width, output_width] = panel_sizes(
+            self.width
+                .or(self.initial_width)
+                .unwrap_or(PanelSize::Ratio(30, 100))
+                .outer_size(area.width),
+            area.width,
+            area.width,
+        );
         [
             Rect::new(area.x, area.y, jobs_width, area.height),
-            Rect::new(
-                area.x + jobs_width,
-                area.y,
-                area.width - jobs_width,
-                area.height,
-            ),
+            Rect::new(area.x + jobs_width, area.y, output_width, area.height),
         ]
     }
 
@@ -1294,11 +1277,12 @@ impl PanelSplit {
                 } else {
                     (i32::from(drag.width) + delta).clamp(0, i32::from(content.width)) as u16
                 };
-                let width = snap_panel_width(width, content.width);
-                self.width = Some(match self.initial_width {
-                    Some(JobsWidth::Cols(_)) => JobsWidth::Cols(width.saturating_sub(2)),
-                    _ => JobsWidth::Ratio(width, content.width),
-                });
+                let width = panel_sizes(width, content.width, content.width)[0];
+                self.width = Some(
+                    self.initial_width
+                        .unwrap_or(PanelSize::Ratio(30, 100))
+                        .resized(width, content.width),
+                );
                 true
             }
             MouseEventKind::Up(MouseButton::Left) => self.drag.take().is_some(),
@@ -1315,6 +1299,7 @@ impl PanelSplit {
 struct DetailsSplit {
     initial_height: Option<u16>,
     height: Option<u16>,
+    prioritize_details: bool,
     drag: Option<(u16, u16)>,
     last_click: Option<(Instant, u16, u16)>,
 }
@@ -1325,12 +1310,15 @@ impl DetailsSplit {
             .height
             .or(self.initial_height)
             .unwrap_or(MAX_DETAILS_HEIGHT)
-            .min(MAX_DETAILS_HEIGHT)
-            .min(area.height.saturating_sub(3));
-        let height = if height < 3 { 0 } else { height };
+            .min(if self.prioritize_details {
+                area.height
+            } else {
+                area.height.saturating_sub(MIN_PANEL_SIZE)
+            });
+        let [height, output_height] = panel_sizes(height, area.height, MAX_DETAILS_HEIGHT);
         [
             Rect::new(area.x, area.y, area.width, height),
-            Rect::new(area.x, area.y + height, area.width, area.height - height),
+            Rect::new(area.x, area.y + height, area.width, output_height),
         ]
     }
 
@@ -1352,6 +1340,7 @@ impl DetailsSplit {
                         && row.abs_diff(mouse.row) <= 1
                 }) {
                     self.height = None;
+                    self.prioritize_details = false;
                     return true;
                 }
                 self.last_click = Some((Instant::now(), mouse.column, mouse.row));
@@ -1363,12 +1352,15 @@ impl DetailsSplit {
                 let Some((row, height)) = self.drag else {
                     return false;
                 };
-                self.height = Some(
-                    (i32::from(height) + i32::from(mouse.row) - i32::from(row)).clamp(
-                        0,
-                        i32::from(MAX_DETAILS_HEIGHT.min(area.height.saturating_sub(3))),
-                    ) as u16,
-                );
+                let height = if mouse.row >= area.bottom() - 1 {
+                    area.height
+                } else {
+                    (i32::from(height) + i32::from(mouse.row) - i32::from(row))
+                        .clamp(0, i32::from(area.height)) as u16
+                };
+                let [height, output_height] = panel_sizes(height, area.height, MAX_DETAILS_HEIGHT);
+                self.height = Some(height);
+                self.prioritize_details = output_height == 0 && height > 0;
                 true
             }
             MouseEventKind::Up(MouseButton::Left) => self.drag.take().is_some(),
@@ -1381,14 +1373,24 @@ impl DetailsSplit {
     }
 }
 
-fn snap_panel_width(width: u16, total: u16) -> u16 {
-    if width < MIN_PANEL_WIDTH {
+fn panel_sizes(size: u16, total: u16, max: u16) -> [u16; 2] {
+    let size = size.min(total).min(max);
+    let size = if size < MIN_PANEL_SIZE {
         0
-    } else if total - width < MIN_PANEL_WIDTH {
-        total
+    } else if total - size < MIN_PANEL_SIZE {
+        total.min(max)
     } else {
-        width
-    }
+        size
+    };
+    let remainder = total - size;
+    [
+        size,
+        if remainder < MIN_PANEL_SIZE {
+            0
+        } else {
+            remainder
+        },
+    ]
 }
 
 fn mouse_wheel_direction(kind: MouseEventKind) -> Option<MouseWheelDirection> {
@@ -1569,6 +1571,147 @@ mod tests {
     }
 
     #[test]
+    fn details_resize_and_reset_preserve_configured_height() {
+        let area = Rect::new(30, 5, 70, 24);
+        for (initial_height, heights) in [
+            (0, [0, 0, 0, 0, 0, 0]),
+            (3, [3, 3, 0, 0, 0, 3]),
+            (6, [6, 5, 0, 0, 0, 6]),
+            (8, [8, 5, 0, 0, 0, 8]),
+        ] {
+            let mut split = DetailsSplit {
+                initial_height: Some(initial_height),
+                ..DetailsSplit::default()
+            };
+            for (available, expected) in [24, 8, 5, 3, 0, 24].into_iter().zip(heights) {
+                let [details, output] = split.areas(Rect::new(30, 5, 70, available));
+                assert_eq!(details.height, expected);
+                assert!(output.height == 0 || output.height >= MIN_PANEL_SIZE);
+            }
+            for (kind, row) in [
+                (MouseEventKind::Down(MouseButton::Left), 5 + initial_height),
+                (MouseEventKind::Drag(MouseButton::Left), 9),
+                (MouseEventKind::Up(MouseButton::Left), 9),
+                (MouseEventKind::Down(MouseButton::Left), 9),
+                (MouseEventKind::Up(MouseButton::Left), 9),
+                (MouseEventKind::Down(MouseButton::Left), 9),
+            ] {
+                assert!(split.handle_mouse(mouse(kind, 40, row), area));
+            }
+            assert_eq!(split.areas(area)[0].height, initial_height);
+            assert!(split.drag.is_none());
+        }
+    }
+
+    #[test]
+    fn details_and_output_never_render_border_only_heights() {
+        for prioritize_details in [false, true] {
+            for height in 0..=MAX_DETAILS_HEIGHT {
+                let split = DetailsSplit {
+                    height: Some(height),
+                    prioritize_details,
+                    ..DetailsSplit::default()
+                };
+                for available in 0..=24 {
+                    let [details, output] = split.areas(Rect::new(30, 5, 70, available));
+                    assert!(details.height == 0 || details.height >= MIN_PANEL_SIZE);
+                    assert!(output.height == 0 || output.height >= MIN_PANEL_SIZE);
+                    assert!(details.height <= MAX_DETAILS_HEIGHT);
+                    assert!(details.height + output.height <= available);
+                    assert!(available - details.height - output.height < MIN_PANEL_SIZE);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn details_drag_snaps_output_closed_without_exceeding_its_height_cap() {
+        for (available, details, output) in [
+            (6, 6, 0),
+            (7, 7, 0),
+            (8, 8, 0),
+            (9, 8, 0),
+            (10, 8, 0),
+            (11, 8, 3),
+        ] {
+            let area = Rect::new(30, 5, 70, available);
+            let mut split = DetailsSplit::default();
+            let row = split.areas(area)[0].bottom();
+            for kind in [
+                MouseEventKind::Down(MouseButton::Left),
+                MouseEventKind::Drag(MouseButton::Left),
+                MouseEventKind::Up(MouseButton::Left),
+            ] {
+                let row = if matches!(kind, MouseEventKind::Down(_)) {
+                    row
+                } else {
+                    row + 1
+                };
+                assert!(split.handle_mouse(mouse(kind, 40, row), area));
+            }
+            assert_eq!(split.areas(area)[0].height, details);
+            assert_eq!(split.areas(area)[1].height, output);
+        }
+    }
+
+    #[test]
+    fn details_drag_can_override_output_reservation_and_reset() {
+        let area = Rect::new(30, 5, 70, 8);
+        for border in [0, 1] {
+            let mut split = DetailsSplit::default();
+            assert_eq!(split.areas(area)[0].height, 5);
+            assert_eq!(split.areas(area)[1].height, 3);
+            for (kind, row) in [
+                (MouseEventKind::Down(MouseButton::Left), 10 - border),
+                (MouseEventKind::Drag(MouseButton::Left), 12),
+                (MouseEventKind::Up(MouseButton::Left), 12),
+            ] {
+                assert!(split.handle_mouse(mouse(kind, 40, row), area));
+            }
+            assert_eq!(split.areas(area)[0], area);
+            assert_eq!(split.areas(area)[1].height, 0);
+            for (available, details, output) in [(6, 6, 0), (24, 8, 16), (8, 8, 0)] {
+                let panes = split.areas(Rect::new(30, 5, 70, available));
+                assert_eq!(panes[0].height, details);
+                assert_eq!(panes[1].height, output);
+            }
+            for kind in [
+                MouseEventKind::Down(MouseButton::Left),
+                MouseEventKind::Up(MouseButton::Left),
+                MouseEventKind::Down(MouseButton::Left),
+            ] {
+                assert!(split.handle_mouse(mouse(kind, 40, 12), area));
+            }
+            assert_eq!(split.areas(area)[0].height, 5);
+            assert_eq!(split.areas(area)[1].height, 3);
+            assert!(!split.prioritize_details);
+        }
+    }
+
+    #[test]
+    fn dragging_details_up_restores_output_reservation() {
+        let area = Rect::new(30, 5, 70, 8);
+        let mut split = DetailsSplit {
+            height: Some(8),
+            prioritize_details: true,
+            ..DetailsSplit::default()
+        };
+        for (kind, row) in [
+            (MouseEventKind::Down(MouseButton::Left), 12),
+            (MouseEventKind::Drag(MouseButton::Left), 9),
+            (MouseEventKind::Up(MouseButton::Left), 9),
+        ] {
+            assert!(split.handle_mouse(mouse(kind, 40, row), area));
+        }
+        assert_eq!(split.areas(area)[0].height, 5);
+        assert_eq!(split.areas(area)[1].height, 3);
+        assert!(!split.prioritize_details);
+        let panes = split.areas(Rect::new(30, 5, 70, 6));
+        assert_eq!(panes[0].height, 3);
+        assert_eq!(panes[1].height, 3);
+    }
+
+    #[test]
     fn details_resize_preserves_output_space_and_ignores_content_clicks() {
         let mut split = DetailsSplit {
             height: Some(5),
@@ -1579,8 +1722,18 @@ mod tests {
             let [details, output] = split.areas(area);
             assert!(details.height <= 5);
             assert!(details.height == 0 || details.height >= 3);
-            assert!(output.height >= height.min(3));
-            assert_eq!(details.height + output.height, height);
+            assert_eq!(
+                output.height,
+                if height < MIN_PANEL_SIZE {
+                    0
+                } else {
+                    height - details.height
+                }
+            );
+            assert_eq!(
+                details.height + output.height,
+                if height < MIN_PANEL_SIZE { 0 } else { height }
+            );
         }
         assert_eq!(split.areas(Rect::new(30, 5, 70, 30))[0].height, 5);
         for (column, row) in [(29, 9), (100, 9), (40, 4), (40, 6), (40, 11), (40, 29)] {
@@ -1679,7 +1832,7 @@ mod tests {
     fn panel_columns_preserve_initial_width_across_window_resizes() {
         for (cols, pane_width) in [(0, 0), (1, 3), (45, 47), (100, 102), (u16::MAX, u16::MAX)] {
             let split = PanelSplit {
-                initial_width: Some(JobsWidth::Cols(cols)),
+                initial_width: Some(PanelSize::Content(cols)),
                 ..PanelSplit::default()
             };
             for width in [200, 30, 2, 0, 100, 200] {
@@ -1699,7 +1852,7 @@ mod tests {
         for border in [0, 1] {
             for width in [0, 60, 100] {
                 let mut split = PanelSplit {
-                    initial_width: Some(JobsWidth::Cols(45)),
+                    initial_width: Some(PanelSize::Content(45)),
                     ..PanelSplit::default()
                 };
                 for (kind, column) in [
@@ -1752,8 +1905,8 @@ mod tests {
                 for border in [0, 1] {
                     let mut split = PanelSplit {
                         initial_width: initial_ratio
-                            .map(|(width, total)| JobsWidth::Ratio(width, total)),
-                        width: Some(JobsWidth::Ratio(width, 100)),
+                            .map(|(width, total)| PanelSize::Ratio(width, total)),
+                        width: Some(PanelSize::Ratio(width, 100)),
                         ..PanelSplit::default()
                     };
                     let jobs = jobs_area(&split, area);
@@ -1789,7 +1942,7 @@ mod tests {
         let area = Rect::new(10, 5, 100, 24);
         for (elapsed, column, row) in [(401, 70, 6), (0, 70, 7), (0, 68, 6)] {
             let mut split = PanelSplit {
-                width: Some(JobsWidth::Ratio(60, 100)),
+                width: Some(PanelSize::Ratio(60, 100)),
                 last_click: Some((Instant::now() - Duration::from_millis(elapsed), column, row)),
                 ..PanelSplit::default()
             };
@@ -1913,7 +2066,7 @@ mod tests {
 
         for (ratio, widths) in [((5, 100), [0, 3, 5]), ((95, 100), [40, 57, 95])] {
             let split = PanelSplit {
-                width: Some(JobsWidth::Ratio(ratio.0, ratio.1)),
+                width: Some(PanelSize::Ratio(ratio.0, ratio.1)),
                 ..PanelSplit::default()
             };
             for (width, expected) in [40, 60, 100].into_iter().zip(widths) {
@@ -1922,7 +2075,7 @@ mod tests {
                     expected
                 );
             }
-            for width in 0..MIN_PANEL_WIDTH {
+            for width in 0..MIN_PANEL_SIZE {
                 assert!(
                     split
                         .areas(Rect::new(0, 0, width, 24))
