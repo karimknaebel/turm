@@ -152,7 +152,7 @@ impl App {
         slurm_refresh_rate: u64,
         file_refresh_rate: u64,
         squeue_args: Vec<String>,
-        jobs_width: u16,
+        jobs_width: JobsWidth,
         details_lines: u16,
     ) -> App {
         let (sender, receiver) = unbounded();
@@ -183,7 +183,7 @@ impl App {
             job_output_area: Rect::default(),
             content_area: Rect::default(),
             panel_split: PanelSplit {
-                initial_ratio: Some((jobs_width, 100)),
+                initial_width: Some(jobs_width),
                 ..PanelSplit::default()
             },
             details_split: DetailsSplit {
@@ -1205,10 +1205,16 @@ fn rect_contains(rect: Rect, column: u16, row: u16) -> bool {
         && row < rect.y.saturating_add(rect.height)
 }
 
+#[derive(Clone, Copy)]
+pub enum JobsWidth {
+    Ratio(u16, u16),
+    Cols(u16),
+}
+
 #[derive(Default)]
 struct PanelSplit {
-    initial_ratio: Option<(u16, u16)>,
-    ratio: Option<(u16, u16)>,
+    initial_width: Option<JobsWidth>,
+    width: Option<JobsWidth>,
     drag: Option<PanelDrag>,
     last_click: Option<(Instant, u16, u16)>,
 }
@@ -1223,11 +1229,18 @@ impl PanelSplit {
         if area.width < MIN_PANEL_WIDTH {
             area.width = 0;
         }
-        let (width, total) = self.ratio.or(self.initial_ratio).unwrap_or((30, 100));
-        let jobs_width = snap_panel_width(
-            (u32::from(width) * u32::from(area.width)).div_ceil(u32::from(total)) as u16,
-            area.width,
-        );
+        let jobs_width = match self
+            .width
+            .or(self.initial_width)
+            .unwrap_or(JobsWidth::Ratio(30, 100))
+        {
+            JobsWidth::Ratio(width, total) => {
+                (u32::from(width) * u32::from(area.width)).div_ceil(u32::from(total)) as u16
+            }
+            JobsWidth::Cols(0) => 0,
+            JobsWidth::Cols(cols) => cols.saturating_add(2).min(area.width),
+        };
+        let jobs_width = snap_panel_width(jobs_width, area.width);
         [
             Rect::new(area.x, area.y, jobs_width, area.height),
             Rect::new(
@@ -1255,7 +1268,7 @@ impl PanelSplit {
                         && column.abs_diff(mouse.column) <= 1
                         && row == mouse.row
                 }) {
-                    self.ratio = None;
+                    self.width = None;
                     return true;
                 }
                 self.last_click = Some((Instant::now(), mouse.column, mouse.row));
@@ -1281,7 +1294,11 @@ impl PanelSplit {
                 } else {
                     (i32::from(drag.width) + delta).clamp(0, i32::from(content.width)) as u16
                 };
-                self.ratio = Some((snap_panel_width(width, content.width), content.width));
+                let width = snap_panel_width(width, content.width);
+                self.width = Some(match self.initial_width {
+                    Some(JobsWidth::Cols(_)) => JobsWidth::Cols(width.saturating_sub(2)),
+                    _ => JobsWidth::Ratio(width, content.width),
+                });
                 true
             }
             MouseEventKind::Up(MouseButton::Left) => self.drag.take().is_some(),
@@ -1659,14 +1676,84 @@ mod tests {
     }
 
     #[test]
+    fn panel_columns_preserve_initial_width_across_window_resizes() {
+        for (cols, pane_width) in [(0, 0), (1, 3), (45, 47), (100, 102), (u16::MAX, u16::MAX)] {
+            let split = PanelSplit {
+                initial_width: Some(JobsWidth::Cols(cols)),
+                ..PanelSplit::default()
+            };
+            for width in [200, 30, 2, 0, 100, 200] {
+                let [jobs, output] = split.areas(Rect::new(10, 5, width, 24));
+                assert_eq!(
+                    jobs.width,
+                    if width < 3 { 0 } else { pane_width.min(width) }
+                );
+                assert_eq!(jobs.width + output.width, if width < 3 { 0 } else { width });
+            }
+        }
+    }
+
+    #[test]
+    fn panel_columns_preserve_dragged_width_and_reset_to_initial_width() {
+        let area = Rect::new(10, 5, 100, 24);
+        for border in [0, 1] {
+            for width in [0, 60, 100] {
+                let mut split = PanelSplit {
+                    initial_width: Some(JobsWidth::Cols(45)),
+                    ..PanelSplit::default()
+                };
+                for (kind, column) in [
+                    (MouseEventKind::Down(MouseButton::Left), 57 - border),
+                    (
+                        MouseEventKind::Drag(MouseButton::Left),
+                        (10 + width - border).clamp(10, 109),
+                    ),
+                    (
+                        MouseEventKind::Up(MouseButton::Left),
+                        (10 + width - border).clamp(10, 109),
+                    ),
+                ] {
+                    assert!(split.handle_mouse(
+                        mouse(kind, column, 6),
+                        jobs_area(&split, area),
+                        area
+                    ));
+                }
+                for total in [200, 30, 2, 0, 100] {
+                    assert_eq!(
+                        jobs_area(&split, Rect::new(10, 5, total, 24)).width,
+                        if total < 3 { 0 } else { width.min(total) },
+                    );
+                }
+                let jobs = jobs_area(&split, area);
+                for kind in [
+                    MouseEventKind::Down(MouseButton::Left),
+                    MouseEventKind::Up(MouseButton::Left),
+                    MouseEventKind::Down(MouseButton::Left),
+                ] {
+                    assert!(split.handle_mouse(
+                        mouse(kind, jobs.right().clamp(area.x, area.right() - 1), 6),
+                        jobs,
+                        area,
+                    ));
+                }
+                assert_eq!(jobs_area(&split, area).width, 47);
+                assert_eq!(jobs_area(&split, Rect::new(10, 5, 200, 24)).width, 47);
+                assert!(split.drag.is_none());
+            }
+        }
+    }
+
+    #[test]
     fn panel_double_click_restores_initial_ratio() {
         let area = Rect::new(10, 5, 100, 24);
         for initial_ratio in [None, Some((45, 100))] {
             for width in [0, 60, 100] {
                 for border in [0, 1] {
                     let mut split = PanelSplit {
-                        initial_ratio,
-                        ratio: Some((width, 100)),
+                        initial_width: initial_ratio
+                            .map(|(width, total)| JobsWidth::Ratio(width, total)),
+                        width: Some(JobsWidth::Ratio(width, 100)),
                         ..PanelSplit::default()
                     };
                     let jobs = jobs_area(&split, area);
@@ -1702,7 +1789,7 @@ mod tests {
         let area = Rect::new(10, 5, 100, 24);
         for (elapsed, column, row) in [(401, 70, 6), (0, 70, 7), (0, 68, 6)] {
             let mut split = PanelSplit {
-                ratio: Some((60, 100)),
+                width: Some(JobsWidth::Ratio(60, 100)),
                 last_click: Some((Instant::now() - Duration::from_millis(elapsed), column, row)),
                 ..PanelSplit::default()
             };
@@ -1826,7 +1913,7 @@ mod tests {
 
         for (ratio, widths) in [((5, 100), [0, 3, 5]), ((95, 100), [40, 57, 95])] {
             let split = PanelSplit {
-                ratio: Some(ratio),
+                width: Some(JobsWidth::Ratio(ratio.0, ratio.1)),
                 ..PanelSplit::default()
             };
             for (width, expected) in [40, 60, 100].into_iter().zip(widths) {

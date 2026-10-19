@@ -5,7 +5,7 @@ mod job_watcher;
 mod pager;
 mod squeue_args;
 
-use app::{App, AppExit, Dialog};
+use app::{App, AppExit, Dialog, JobsWidth};
 use clap::CommandFactory;
 use clap::Parser;
 use clap::Subcommand;
@@ -54,9 +54,14 @@ struct Cli {
         env = "TURM_JOBS_WIDTH",
         value_name = "PERCENT",
         default_value_t = 30,
+        conflicts_with = "jobs_cols",
         value_parser = clap::value_parser!(u16).range(0..=100)
     )]
     jobs_width: u16,
+
+    /// Initial Jobs pane content columns, excluding borders (0 hides it). Fixed on window resize.
+    #[arg(long, env = "TURM_JOBS_COLS", value_name = "COLS")]
+    jobs_cols: Option<u16>,
 
     /// Initial Details pane content lines, excluding borders (0 hides it).
     #[arg(
@@ -189,7 +194,9 @@ fn run_app<W: Write>(
         args.slurm_refresh,
         args.file_refresh,
         args.squeue_args.to_vec(),
-        args.jobs_width,
+        args.jobs_cols
+            .map(JobsWidth::Cols)
+            .unwrap_or(JobsWidth::Ratio(args.jobs_width, 100)),
         args.details_lines,
     );
     loop {
@@ -212,6 +219,47 @@ fn run_app<W: Write>(
                     });
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::{FromArgMatches, error::ErrorKind};
+
+    #[test]
+    fn jobs_width_options() {
+        let command = Cli::command()
+            .mut_arg("jobs_width", |arg| arg.env(None::<&str>))
+            .mut_arg("jobs_cols", |arg| arg.env(None::<&str>));
+        for (args, width, cols) in [
+            (vec!["turm"], 30, None),
+            (vec!["turm", "--jobs-width", "45"], 45, None),
+            (vec!["turm", "--jobs-cols", "45"], 30, Some(45)),
+            (vec!["turm", "--jobs-cols", "0"], 30, Some(0)),
+            (vec!["turm", "--jobs-cols", "65535"], 30, Some(u16::MAX)),
+        ] {
+            let cli = Cli::from_arg_matches(&command.clone().try_get_matches_from(args).unwrap())
+                .unwrap();
+            assert_eq!(cli.jobs_width, width);
+            assert_eq!(cli.jobs_cols, cols);
+        }
+        assert_eq!(
+            command
+                .clone()
+                .try_get_matches_from(["turm", "--jobs-width", "30", "--jobs-cols", "45"])
+                .unwrap_err()
+                .kind(),
+            ErrorKind::ArgumentConflict,
+        );
+        for value in ["-1", "65536", "abc"] {
+            assert!(
+                command
+                    .clone()
+                    .try_get_matches_from(["turm", "--jobs-cols", value])
+                    .is_err()
+            );
         }
     }
 }
