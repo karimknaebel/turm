@@ -14,18 +14,21 @@ use std::{
 
 use crate::file_watcher::{FileWatcherError, FileWatcherHandle};
 use crate::input::{Input as TerminalInput, PAGER_KEY};
+use crate::job_list::JobList;
 use crate::job_watcher::JobWatcherHandle;
 use crate::pager::PagerChild;
 use crate::panel_size::PanelSize;
 
-use crossterm::event::{Event, KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::{
     Frame, Terminal,
     backend::Backend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, ListState, Paragraph, Wrap},
 };
 use std::io;
 use tui_input::{Input, backend::crossterm::EventHandler};
@@ -69,6 +72,7 @@ pub struct App {
     dialog: Option<Dialog>,
     jobs: Vec<Job>,
     job_list_state: ListState,
+    job_list_horizontal_offset: u16,
     job_output: Result<String, FileWatcherError>,
     job_output_anchor: ScrollAnchor,
     job_output_offset: u16,
@@ -134,6 +138,8 @@ pub enum AppMessage {
 pub(crate) enum MouseWheelDirection {
     Up,
     Down,
+    Left,
+    Right,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -167,6 +173,7 @@ impl App {
                 squeue_args,
             ),
             job_list_state: ListState::default(),
+            job_list_horizontal_offset: 0,
             job_output: Ok("".to_string()),
             job_output_anchor: ScrollAnchor::Bottom,
             job_output_offset: 0,
@@ -313,18 +320,21 @@ impl App {
                     }
                     (false, false)
                 }
-                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                MouseEventKind::ScrollUp
+                | MouseEventKind::ScrollDown
+                | MouseEventKind::ScrollLeft
+                | MouseEventKind::ScrollRight => {
                     if self.panel_split.drag.is_some() || self.details_split.drag.is_some() {
                         return (false, false);
                     }
                     let Some(target) = self.mouse_scroll_target(mouse.column, mouse.row) else {
                         return (false, false);
                     };
-                    let direction = mouse_wheel_direction(mouse.kind).unwrap();
+                    let direction = mouse_wheel_direction(mouse).unwrap();
                     let mut amount = 1u16;
                     while let Some(next_event) = self.try_recv_input_event() {
                         let should_merge = if let Event::Mouse(next_mouse) = &next_event {
-                            mouse_wheel_direction(next_mouse.kind) == Some(direction)
+                            mouse_wheel_direction(*next_mouse) == Some(direction)
                                 && self.mouse_scroll_target(next_mouse.column, next_mouse.row)
                                     == Some(target)
                         } else {
@@ -471,8 +481,14 @@ impl App {
                     }
                 } else {
                     match key.code {
-                        KeyCode::Char('h') | KeyCode::Left => self.focus_previous_panel(),
-                        KeyCode::Char('l') | KeyCode::Right => self.focus_next_panel(),
+                        KeyCode::Char('h') | KeyCode::Left => {
+                            self.job_list_horizontal_offset =
+                                self.job_list_horizontal_offset.saturating_sub(1);
+                        }
+                        KeyCode::Char('l') | KeyCode::Right => {
+                            self.job_list_horizontal_offset =
+                                self.job_list_horizontal_offset.saturating_add(1);
+                        }
                         KeyCode::Char('k') | KeyCode::Up => match self.focus {
                             Focus::Jobs => self.select_previous_job(),
                         },
@@ -589,10 +605,19 @@ impl App {
                         MouseScrollTarget::Jobs => match direction {
                             MouseWheelDirection::Up => self.job_list_state.scroll_up_by(amount),
                             MouseWheelDirection::Down => self.job_list_state.scroll_down_by(amount),
+                            MouseWheelDirection::Left => {
+                                self.job_list_horizontal_offset =
+                                    self.job_list_horizontal_offset.saturating_sub(amount);
+                            }
+                            MouseWheelDirection::Right => {
+                                self.job_list_horizontal_offset =
+                                    self.job_list_horizontal_offset.saturating_add(amount);
+                            }
                         },
                         MouseScrollTarget::Output => match direction {
                             MouseWheelDirection::Up => self.scroll_job_output_up_by(amount),
                             MouseWheelDirection::Down => self.scroll_job_output_down_by(amount),
+                            MouseWheelDirection::Left | MouseWheelDirection::Right => {}
                         },
                     }
                 }
@@ -623,6 +648,7 @@ impl App {
         let help_options = vec![
             ("q", "quit"),
             ("⏶/⏷", "navigate"),
+            ("←/→", "scroll jobs"),
             ("pgup/pgdown", "scroll"),
             ("home/end", "top/bottom"),
             ("esc", "cancel"),
@@ -668,11 +694,11 @@ impl App {
             .map(|j| j.state_compact.len())
             .max()
             .unwrap_or(0);
-        let jobs: Vec<ListItem> = self
+        let jobs = self
             .jobs
             .iter()
             .map(|j| {
-                ListItem::new(Line::from(vec![
+                Line::from(vec![
                     Span::styled(
                         format!(
                             "{:<max$.max$}",
@@ -703,24 +729,24 @@ impl App {
                     ),
                     Span::raw(" "),
                     Span::raw(&j.name),
-                ]))
+                ])
             })
             .collect();
-        let job_list = List::new(jobs)
-            .block(
-                Block::default()
-                    .title(format!("─Jobs ({})", self.jobs.len()))
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(if self.dialog.is_some() {
-                        Style::default()
-                    } else {
-                        match self.focus {
-                            Focus::Jobs => Style::default().fg(Color::Green),
-                        }
-                    }),
-            )
-            .highlight_style(Style::default().bg(Color::Green).fg(Color::Black));
+        let job_list = JobList {
+            lines: jobs,
+            horizontal_offset: &mut self.job_list_horizontal_offset,
+            block: Block::default()
+                .title(format!("─Jobs ({})", self.jobs.len()))
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(if self.dialog.is_some() {
+                    Style::default()
+                } else {
+                    match self.focus {
+                        Focus::Jobs => Style::default().fg(Color::Green),
+                    }
+                }),
+        };
         f.render_stateful_widget(job_list, master_detail[0], &mut self.job_list_state);
         self.job_list_height = master_detail[0].height.saturating_sub(2); // account for borders
         self.job_list_area = master_detail[0];
@@ -1111,18 +1137,6 @@ impl App {
             })
     }
 
-    fn focus_next_panel(&mut self) {
-        match self.focus {
-            Focus::Jobs => self.focus = Focus::Jobs,
-        }
-    }
-
-    fn focus_previous_panel(&mut self) {
-        match self.focus {
-            Focus::Jobs => self.focus = Focus::Jobs,
-        }
-    }
-
     fn select_next_job(&mut self) {
         self.job_list_state.select_next();
     }
@@ -1393,10 +1407,16 @@ fn panel_sizes(size: u16, total: u16, max: u16) -> [u16; 2] {
     ]
 }
 
-fn mouse_wheel_direction(kind: MouseEventKind) -> Option<MouseWheelDirection> {
-    match kind {
-        MouseEventKind::ScrollUp => Some(MouseWheelDirection::Up),
-        MouseEventKind::ScrollDown => Some(MouseWheelDirection::Down),
+fn mouse_wheel_direction(mouse: MouseEvent) -> Option<MouseWheelDirection> {
+    match (mouse.kind, mouse.modifiers.contains(KeyModifiers::SHIFT)) {
+        (MouseEventKind::ScrollUp, true) | (MouseEventKind::ScrollLeft, _) => {
+            Some(MouseWheelDirection::Left)
+        }
+        (MouseEventKind::ScrollDown, true) | (MouseEventKind::ScrollRight, _) => {
+            Some(MouseWheelDirection::Right)
+        }
+        (MouseEventKind::ScrollUp, false) => Some(MouseWheelDirection::Up),
+        (MouseEventKind::ScrollDown, false) => Some(MouseWheelDirection::Down),
         _ => None,
     }
 }
@@ -1491,7 +1511,10 @@ fn execute_command(mut command: Command, command_label: String) -> Result<(), Co
 mod tests {
     use super::*;
     use crossterm::event::KeyModifiers;
-    use ratatui::{buffer::Buffer, widgets::StatefulWidget};
+    use ratatui::{
+        buffer::Buffer,
+        widgets::{List, StatefulWidget},
+    };
 
     fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
         MouseEvent {
@@ -1504,6 +1527,40 @@ mod tests {
 
     fn jobs_area(split: &PanelSplit, area: Rect) -> Rect {
         split.areas(area)[0]
+    }
+
+    #[test]
+    fn mouse_wheel_maps_horizontal_and_shifted_vertical_events() {
+        for (kind, normal, shifted) in [
+            (
+                MouseEventKind::ScrollUp,
+                MouseWheelDirection::Up,
+                MouseWheelDirection::Left,
+            ),
+            (
+                MouseEventKind::ScrollDown,
+                MouseWheelDirection::Down,
+                MouseWheelDirection::Right,
+            ),
+            (
+                MouseEventKind::ScrollLeft,
+                MouseWheelDirection::Left,
+                MouseWheelDirection::Left,
+            ),
+            (
+                MouseEventKind::ScrollRight,
+                MouseWheelDirection::Right,
+                MouseWheelDirection::Right,
+            ),
+        ] {
+            let mut event = mouse(kind, 0, 0);
+            assert!(mouse_wheel_direction(event) == Some(normal));
+            event.modifiers = KeyModifiers::SHIFT;
+            assert!(mouse_wheel_direction(event) == Some(shifted));
+        }
+        assert!(
+            mouse_wheel_direction(mouse(MouseEventKind::Down(MouseButton::Left), 0, 0)).is_none()
+        );
     }
 
     #[test]
