@@ -58,8 +58,8 @@ struct Cli {
     )]
     jobs_width: u16,
 
-    /// Log viewer command (defaults to TURM_PAGER, PAGER, then less or more).
-    #[arg(long, value_name = "COMMAND")]
+    /// Log viewer command (falls back to PAGER, then less or more).
+    #[arg(long, env = "TURM_PAGER", value_name = "COMMAND")]
     pager: Option<String>,
 
     /// squeue arguments
@@ -174,11 +174,7 @@ fn run_app<W: Write>(
     args: Cli,
     keyboard_signals_default: &AtomicBool,
 ) -> io::Result<()> {
-    let pager = Pager::new(
-        args.pager,
-        env::var("TURM_PAGER").ok(),
-        env::var("PAGER").ok(),
-    );
+    let pager = Pager::new(args.pager, env::var("PAGER").ok());
     let mut app = App::new(
         args.slurm_refresh,
         args.file_refresh,

@@ -21,8 +21,8 @@ pub struct Pager {
 }
 
 impl Pager {
-    pub fn new(cli: Option<String>, turm_pager: Option<String>, pager: Option<String>) -> Self {
-        match [cli, turm_pager, pager]
+    pub fn new(configured: Option<String>, pager: Option<String>) -> Self {
+        match [configured, pager]
             .into_iter()
             .flatten()
             .find(|value| !value.trim().is_empty())
@@ -165,18 +165,15 @@ mod tests {
 
     #[test]
     fn configuration_precedence() {
-        for (cli, turm, pager, expected, fallback) in [
-            (Some("bat"), Some("less"), Some("more"), "bat", false),
-            (None, Some("bat"), Some("more"), "bat", false),
-            (None, None, Some("more"), "more", false),
-            (Some(" "), Some(""), Some("more"), "more", false),
-            (None, None, None, "less", true),
+        for (configured, pager, expected, fallback) in [
+            (Some("bat"), Some("more"), "bat", false),
+            (None, Some("more"), "more", false),
+            (Some(" "), Some("more"), "more", false),
+            (Some(""), Some("more"), "more", false),
+            (None, Some(" "), "less", true),
+            (None, None, "less", true),
         ] {
-            let pager = Pager::new(
-                cli.map(str::to_owned),
-                turm.map(str::to_owned),
-                pager.map(str::to_owned),
-            );
+            let pager = Pager::new(configured.map(str::to_owned), pager.map(str::to_owned));
             assert_eq!(pager.command, expected);
             assert_eq!(pager.fallback, fallback);
         }
