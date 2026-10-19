@@ -31,11 +31,21 @@ use std::{env, io, panic};
 #[command(author, version, about, long_about = None)]
 struct Cli {
     /// Refresh rate for the job watcher.
-    #[arg(long, value_name = "SECONDS", default_value_t = 2)]
+    #[arg(
+        long,
+        env = "TURM_SLURM_REFRESH",
+        value_name = "SECONDS",
+        default_value_t = 2
+    )]
     slurm_refresh: u64,
 
     /// Refresh rate for the file watcher.
-    #[arg(long, value_name = "SECONDS", default_value_t = 2)]
+    #[arg(
+        long,
+        env = "TURM_FILE_REFRESH",
+        value_name = "SECONDS",
+        default_value_t = 2
+    )]
     file_refresh: u64,
 
     /// Initial Jobs pane width as a percentage (0-100).
