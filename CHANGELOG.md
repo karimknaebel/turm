@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.0](https://github.com/karimknaebel/turm/compare/v0.15.0...v0.16.0) (2026-10-19)
+
+
+### Features
+
+* implement resizable Jobs/Details panel ([3d943a6](https://github.com/karimknaebel/turm/commit/3d943a6262a186a0ec40cb3878be140d8e5bb2c5))
+
 ## [0.15.0](https://github.com/karimknaebel/turm/compare/v0.14.0...v0.15.0) (2026-10-18)
 
 
