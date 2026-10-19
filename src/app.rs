@@ -3,7 +3,14 @@ use crossbeam::{
     select,
 };
 use itertools::Either;
-use std::{cmp::min, iter::once, path::PathBuf, process::Command, thread, time::Duration};
+use std::{
+    cmp::min,
+    iter::once,
+    path::PathBuf,
+    process::Command,
+    thread,
+    time::{Duration, Instant},
+};
 
 use crate::file_watcher::{FileWatcherError, FileWatcherHandle};
 use crate::input::{Input as TerminalInput, PAGER_KEY};
@@ -172,7 +179,7 @@ impl App {
             job_output_area: Rect::default(),
             content_area: Rect::default(),
             panel_split: PanelSplit {
-                ratio: Some((jobs_width, 100)),
+                initial_ratio: Some((jobs_width, 100)),
                 ..PanelSplit::default()
             },
             pending_input_event: None,
@@ -256,6 +263,7 @@ impl App {
         match event {
             Event::Key(key) => {
                 self.panel_split.drag = None;
+                self.panel_split.last_click = None;
                 if key.code == KeyCode::Char('q') {
                     return (true, false);
                 }
@@ -1181,8 +1189,10 @@ fn rect_contains(rect: Rect, column: u16, row: u16) -> bool {
 
 #[derive(Default)]
 struct PanelSplit {
+    initial_ratio: Option<(u16, u16)>,
     ratio: Option<(u16, u16)>,
     drag: Option<PanelDrag>,
+    last_click: Option<(Instant, u16, u16)>,
 }
 
 struct PanelDrag {
@@ -1195,7 +1205,7 @@ impl PanelSplit {
         if area.width < MIN_PANEL_WIDTH {
             area.width = 0;
         }
-        let (width, total) = self.ratio.unwrap_or((30, 100));
+        let (width, total) = self.ratio.or(self.initial_ratio).unwrap_or((30, 100));
         let jobs_width = snap_panel_width(
             (u32::from(width) * u32::from(area.width)).div_ceil(u32::from(total)) as u16,
             area.width,
@@ -1215,12 +1225,22 @@ impl PanelSplit {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.drag = None;
+                let last_click = self.last_click.take();
                 if !rect_contains(content, mouse.column, mouse.row)
                     || mouse.column < jobs.right().saturating_sub(1)
                     || mouse.column > jobs.right()
                 {
                     return false;
                 }
+                if last_click.is_some_and(|(time, column, row)| {
+                    time.elapsed() <= Duration::from_millis(400)
+                        && column.abs_diff(mouse.column) <= 1
+                        && row == mouse.row
+                }) {
+                    self.ratio = None;
+                    return true;
+                }
+                self.last_click = Some((Instant::now(), mouse.column, mouse.row));
                 self.drag = Some(PanelDrag {
                     column: mouse.column,
                     width: jobs.width,
@@ -1228,6 +1248,7 @@ impl PanelSplit {
                 true
             }
             MouseEventKind::Drag(MouseButton::Left) => {
+                self.last_click = None;
                 let Some(drag) = &self.drag else {
                     return false;
                 };
@@ -1246,6 +1267,10 @@ impl PanelSplit {
                 true
             }
             MouseEventKind::Up(MouseButton::Left) => self.drag.take().is_some(),
+            MouseEventKind::Down(_) => {
+                self.last_click = None;
+                false
+            }
             _ => false,
         }
     }
@@ -1451,6 +1476,76 @@ mod tests {
             ));
             assert_eq!(jobs_area(&split, area), jobs);
         }
+    }
+
+    #[test]
+    fn panel_double_click_restores_initial_ratio() {
+        let area = Rect::new(10, 5, 100, 24);
+        for initial_ratio in [None, Some((45, 100))] {
+            for width in [0, 60, 100] {
+                for border in [0, 1] {
+                    let mut split = PanelSplit {
+                        initial_ratio,
+                        ratio: Some((width, 100)),
+                        ..PanelSplit::default()
+                    };
+                    let jobs = jobs_area(&split, area);
+                    let column = (jobs.right() - border).clamp(area.x, area.right() - 1);
+                    for kind in [
+                        MouseEventKind::Down(MouseButton::Left),
+                        MouseEventKind::Up(MouseButton::Left),
+                    ] {
+                        assert!(split.handle_mouse(mouse(kind, column, 6), jobs, area));
+                        assert_eq!(jobs_area(&split, area).width, width);
+                    }
+                    assert!(split.handle_mouse(
+                        mouse(MouseEventKind::Down(MouseButton::Left), column, 6),
+                        jobs,
+                        area,
+                    ));
+                    assert_eq!(
+                        jobs_area(&split, area).width,
+                        initial_ratio.unwrap_or((30, 100)).0
+                    );
+                    assert_eq!(
+                        jobs_area(&split, Rect::new(10, 5, 200, 24)).width,
+                        initial_ratio.unwrap_or((30, 100)).0 * 2,
+                    );
+                    assert!(split.drag.is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn panel_double_click_requires_nearby_clicks_without_dragging() {
+        let area = Rect::new(10, 5, 100, 24);
+        for (elapsed, column, row) in [(401, 70, 6), (0, 70, 7), (0, 68, 6)] {
+            let mut split = PanelSplit {
+                ratio: Some((60, 100)),
+                last_click: Some((Instant::now() - Duration::from_millis(elapsed), column, row)),
+                ..PanelSplit::default()
+            };
+            split.handle_mouse(
+                mouse(MouseEventKind::Down(MouseButton::Left), 70, 6),
+                jobs_area(&split, area),
+                area,
+            );
+            assert_eq!(jobs_area(&split, area).width, 60);
+            assert!(split.drag.is_some());
+        }
+
+        let mut split = PanelSplit::default();
+        for (kind, column) in [
+            (MouseEventKind::Down(MouseButton::Left), 40),
+            (MouseEventKind::Drag(MouseButton::Left), 70),
+            (MouseEventKind::Up(MouseButton::Left), 70),
+            (MouseEventKind::Down(MouseButton::Left), 70),
+        ] {
+            split.handle_mouse(mouse(kind, column, 6), jobs_area(&split, area), area);
+        }
+        assert_eq!(jobs_area(&split, area).width, 60);
+        assert!(split.drag.is_some());
     }
 
     #[test]
