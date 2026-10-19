@@ -64,18 +64,13 @@ turm completion fish | source
 
 ## Panel sizes
 
-- `--jobs-width SIZE` / `TURM_JOBS_WIDTH`: Jobs width in content columns (e.g. `40`)
-  or a percentage of the window (e.g. `25%`). Default: `30%`.
-- `--details-height LINES` / `TURM_DETAILS_HEIGHT`: Details height in content
-  lines, from `0` to `6`. Default: `6`.
-
-Content sizes exclude borders. Set either size to `0` to hide the pane.
-Drag panel borders to resize, or double-click a divider to restore its configured
-size.
+Set `--jobs-width` to columns or a percentage (default: `33%`) and
+`--details-height` to 0–6 content lines (default: `6`). Drag borders to resize;
+double-click to reset.
 
 ## Open in external pager
 
-When pressing <kbd>p</kdb> to open the log in an external pager, the command is chosen in this order: `--pager`, `$TURM_PAGER`, `$PAGER`, then `less` (or `more` if `less` is not installed).
+When pressing <kbd>p</kdb> to open the log in an external pager, the command is chosen in this order: `--pager`, `$TURM_PAGER`, `$PAGER`, then `less`.
 
 ## How it works
 

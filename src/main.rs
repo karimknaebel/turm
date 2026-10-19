@@ -55,7 +55,7 @@ struct Cli {
         long,
         env = "TURM_JOBS_WIDTH",
         value_name = "COLS|PERCENT%",
-        default_value = "30%"
+        default_value = "33%"
     )]
     jobs_width: PanelSize,
 
@@ -230,7 +230,7 @@ mod tests {
         let defaults =
             Cli::from_arg_matches(&command.clone().try_get_matches_from(["turm"]).unwrap())
                 .unwrap();
-        assert_eq!(defaults.jobs_width, PanelSize::Ratio(30, 100));
+        assert_eq!(defaults.jobs_width, PanelSize::Ratio(33, 100));
         assert_eq!(defaults.details_height, 6);
 
         for (value, size) in [

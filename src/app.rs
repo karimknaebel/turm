@@ -1224,7 +1224,7 @@ impl PanelSplit {
         let [jobs_width, output_width] = panel_sizes(
             self.width
                 .or(self.initial_width)
-                .unwrap_or(PanelSize::Ratio(30, 100))
+                .unwrap_or(PanelSize::Ratio(33, 100))
                 .outer_size(area.width),
             area.width,
             area.width,
@@ -1280,7 +1280,7 @@ impl PanelSplit {
                 let width = panel_sizes(width, content.width, content.width)[0];
                 self.width = Some(
                     self.initial_width
-                        .unwrap_or(PanelSize::Ratio(30, 100))
+                        .unwrap_or(PanelSize::Ratio(33, 100))
                         .resized(width, content.width),
                 );
                 true
@@ -1925,11 +1925,11 @@ mod tests {
                     ));
                     assert_eq!(
                         jobs_area(&split, area).width,
-                        initial_ratio.unwrap_or((30, 100)).0
+                        initial_ratio.unwrap_or((33, 100)).0
                     );
                     assert_eq!(
                         jobs_area(&split, Rect::new(10, 5, 200, 24)).width,
-                        initial_ratio.unwrap_or((30, 100)).0 * 2,
+                        initial_ratio.unwrap_or((33, 100)).0 * 2,
                     );
                     assert!(split.drag.is_none());
                 }
@@ -1957,7 +1957,7 @@ mod tests {
 
         let mut split = PanelSplit::default();
         for (kind, column) in [
-            (MouseEventKind::Down(MouseButton::Left), 40),
+            (MouseEventKind::Down(MouseButton::Left), 43),
             (MouseEventKind::Drag(MouseButton::Left), 70),
             (MouseEventKind::Up(MouseButton::Left), 70),
             (MouseEventKind::Down(MouseButton::Left), 70),
