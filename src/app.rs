@@ -138,7 +138,12 @@ const DIALOG_WIDTH: u16 = 80;
 const MIN_PANEL_WIDTH: u16 = 3;
 
 impl App {
-    pub fn new(slurm_refresh_rate: u64, file_refresh_rate: u64, squeue_args: Vec<String>) -> App {
+    pub fn new(
+        slurm_refresh_rate: u64,
+        file_refresh_rate: u64,
+        squeue_args: Vec<String>,
+        jobs_width: u16,
+    ) -> App {
         let (sender, receiver) = unbounded();
         Self {
             focus: Focus::Jobs,
@@ -166,7 +171,10 @@ impl App {
             job_list_area: Rect::default(),
             job_output_area: Rect::default(),
             content_area: Rect::default(),
-            panel_split: PanelSplit::default(),
+            panel_split: PanelSplit {
+                ratio: Some((jobs_width, 100)),
+                ..PanelSplit::default()
+            },
             pending_input_event: None,
             pager_path: None,
         }

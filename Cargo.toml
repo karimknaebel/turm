@@ -11,7 +11,7 @@ rust-version = "1.87"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-clap = { version = "4.5.40", features = ["derive"] }
+clap = { version = "4.5.40", features = ["derive", "env"] }
 clap_complete = "4.5.54"
 crossbeam = "0.8.4"
 crossterm = "0.29.0"

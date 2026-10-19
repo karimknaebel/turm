@@ -38,6 +38,16 @@ struct Cli {
     #[arg(long, value_name = "SECONDS", default_value_t = 2)]
     file_refresh: u64,
 
+    /// Initial Jobs pane width as a percentage (0-100).
+    #[arg(
+        long,
+        env = "TURM_JOBS_WIDTH",
+        value_name = "PERCENT",
+        default_value_t = 30,
+        value_parser = clap::value_parser!(u16).range(0..=100)
+    )]
+    jobs_width: u16,
+
     /// Log viewer command (defaults to TURM_PAGER, PAGER, then less or more).
     #[arg(long, value_name = "COMMAND")]
     pager: Option<String>,
@@ -163,6 +173,7 @@ fn run_app<W: Write>(
         args.slurm_refresh,
         args.file_refresh,
         args.squeue_args.to_vec(),
+        args.jobs_width,
     );
     loop {
         match app.run(terminal.terminal_mut())? {
