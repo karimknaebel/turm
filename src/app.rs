@@ -567,7 +567,7 @@ impl App {
 
         let job_detail_log = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(8), Constraint::Min(3)].as_ref())
+            .constraints([Constraint::Length(9), Constraint::Min(3)].as_ref())
             .split(master_detail[1]);
 
         // Help
@@ -685,7 +685,7 @@ impl App {
 
         let job_detail = job_detail.map(|j| {
             let mut state_spans = vec![
-                Span::styled("State  ", Style::default().fg(Color::Yellow)),
+                Span::styled("State     ", Style::default().fg(Color::Yellow)),
                 Span::raw(" "),
                 Span::raw(&j.state),
             ];
@@ -702,29 +702,34 @@ impl App {
                 ]);
             }
             let state = Line::from(state_spans);
+            let time_limit = Line::from(vec![
+                Span::styled("Time Limit", Style::default().fg(Color::Yellow)),
+                Span::raw(" "),
+                Span::raw(&j.time_limit),
+            ]);
             let name = Line::from(vec![
-                Span::styled("Name   ", Style::default().fg(Color::Yellow)),
+                Span::styled("Name      ", Style::default().fg(Color::Yellow)),
                 Span::raw(" "),
                 Span::raw(&j.name),
             ]);
             let command = Line::from(vec![
-                Span::styled("Command", Style::default().fg(Color::Yellow)),
+                Span::styled("Command   ", Style::default().fg(Color::Yellow)),
                 Span::raw(" "),
                 Span::raw(&j.command),
             ]);
             let nodes = Line::from(vec![
-                Span::styled("Nodes  ", Style::default().fg(Color::Yellow)),
+                Span::styled("Nodes     ", Style::default().fg(Color::Yellow)),
                 Span::raw(" "),
                 Span::raw(&j.nodelist),
             ]);
             let tres = Line::from(vec![
-                Span::styled("TRES   ", Style::default().fg(Color::Yellow)),
+                Span::styled("TRES      ", Style::default().fg(Color::Yellow)),
                 Span::raw(" "),
                 Span::raw(&j.tres),
             ]);
             let ui_stdout_text = match self.output_file_view {
-                OutputFileView::Stdout => "stdout ",
-                OutputFileView::Stderr => "stderr ",
+                OutputFileView::Stdout => "stdout    ",
+                OutputFileView::Stderr => "stderr    ",
             };
             let stdout = Line::from(vec![
                 Span::styled(ui_stdout_text, Style::default().fg(Color::Yellow)),
@@ -740,7 +745,7 @@ impl App {
                 ),
             ]);
 
-            Text::from(vec![state, name, command, nodes, tres, stdout])
+            Text::from(vec![state, time_limit, name, command, nodes, tres, stdout])
         });
         let job_detail = Paragraph::new(job_detail.unwrap_or_default()).block(
             Block::default()
