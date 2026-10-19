@@ -1,7 +1,15 @@
 name: Release
 on:
-  push:
-    branches: [main]
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
 env:
   CARGO_INCREMENTAL: 0
   CARGO_NET_RETRY: 10
@@ -10,27 +18,36 @@ env:
   RUSTUP_MAX_RETRIES: 10
 
 jobs:
-  # Update release PR
-  release_please:
-    name: Release Please
+  validate:
+    name: Validate release version
     runs-on: ubuntu-latest
-    outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
-    permissions:
-      contents: write
-      pull-requests: write
     steps:
-      - uses: googleapis/release-please-action@v4
-        id: release
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          release-type: rust
+          persist-credentials: false
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Check release tag
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[0].version')
+          if [ "$RELEASE_TAG" != "v$version" ]; then
+            echo "::error::Release tag $RELEASE_TAG does not match Cargo.toml version v$version"
+            exit 1
+          fi
+
+  checks:
+    name: Release checks
+    needs: validate
+    uses: ./.github/workflows/test.yml
 
   # Build sources for every OS
   github_build:
     name: Build release binaries
-    needs: release_please
-    if: ${{ needs.release_please.outputs.release_created == 'true' }}
+    needs: checks
     strategy:
       matrix:
         include:
@@ -61,59 +78,65 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Setup | Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Setup | Rust
-        uses: actions-rs/toolchain@v1
+        run: |
+          rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          toolchain: stable
-          override: true
-          profile: minimal
-          target: ${{ matrix.target }}
+          key: cross-${{ matrix.target }}-526d03d
+
+      - name: Setup | Cross
+        run: cargo install cross --git https://github.com/cross-rs/cross --rev 526d03ddcd2f70e683074b3ea6f75ed300f33132 --locked
 
       - name: Build | Build
-        uses: actions-rs/cargo@v1
-        with:
-          command: build
-          args: --release --locked --target ${{ matrix.target }}
-          use-cross: ${{ matrix.os == 'ubuntu-latest' }}
+        run: cross build --release --locked --target ${{ matrix.target }}
 
       - name: Post Build | Prepare artifacts
-        run: |
-          cd target/${{ matrix.target }}/release
-          tar czvf ../../../${{ matrix.name }} turm
-          cd -
+        run: tar czvf ${{ matrix.name }} -C target/${{ matrix.target }}/release turm
 
       - name: Release | Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.name }}
           path: ${{ matrix.name }}
+          if-no-files-found: error
+          compression-level: 0
 
-  # Create GitHub release with Rust build targets and release notes
+  # Attach Rust build targets to the GitHub release
   upload_artifacts:
     name: Add Build Artifacts to Release
-    needs: [release_please, github_build]
+    needs: [github_build, maturin_linux, maturin_musllinux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - name: Setup | Artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: turm-*
+          merge-multiple: true
+          path: dist
 
       - name: Setup | Checksums
-        run: for file in turm-*/turm-*; do openssl dgst -sha256 -r "$file" | awk '{print $1}' > "${file}.sha256"; done
+        working-directory: dist
+        run: for file in *.tar.gz; do sha256sum "$file" > "${file}.sha256"; done
 
       - name: Build | Add Artifacts to Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
-          files: turm-*/turm-*
-          tag_name: ${{ needs.release_please.outputs.tag_name }}
+          files: dist/*
+          tag_name: ${{ github.event.release.tag_name }}
+          fail_on_unmatched_files: true
 
   maturin_linux:
     name: Build Maturin Linux
-    needs: release_please
-    if: ${{ needs.release_please.outputs.release_created == 'true' }}
+    needs: checks
     runs-on: ${{ matrix.platform.runner }}
     strategy:
       matrix:
@@ -131,24 +154,28 @@ jobs:
           - runner: ubuntu-latest
             target: ppc64le
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Build wheels
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist
+          rust-toolchain: stable
+          args: --release --locked --out dist
           sccache: 'true'
           manylinux: auto
       - name: Upload wheels
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: wheels-linux-${{ matrix.platform.target }}
           path: dist
+          if-no-files-found: error
+          compression-level: 0
 
   maturin_musllinux:
     name: Build Maturin Linux musl
-    needs: release_please
-    if: ${{ needs.release_please.outputs.release_created == 'true' }}
+    needs: checks
     runs-on: ${{ matrix.platform.runner }}
     strategy:
       matrix:
@@ -162,41 +189,64 @@ jobs:
           - runner: ubuntu-latest
             target: armv7
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Build wheels
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist
+          rust-toolchain: stable
+          args: --release --locked --out dist
           sccache: 'true'
           manylinux: musllinux_1_2
       - name: Upload wheels
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: wheels-musllinux-${{ matrix.platform.target }}
           path: dist
-          
+          if-no-files-found: error
+          compression-level: 0
+
   maturin_release:
-    name: Maturin | Release
+    name: Publish to PyPI
     runs-on: ubuntu-latest
-    needs: [upload_artifacts, maturin_linux, maturin_musllinux] # only publish if everything else worked
+    needs: upload_artifacts
+    environment: pypi
+    permissions:
+      id-token: write
     steps:
-      - uses: actions/download-artifact@v4
-      - name: Publish to PyPI
-        uses: PyO3/maturin-action@v1
-        env:
-          MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          command: upload
-          args: --non-interactive --skip-existing wheels-*/*
-          
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          skip-existing: true
+
   cargo_publish:
     name: Publish to crates.io
-    needs: [upload_artifacts, maturin_release] # only publish if everything else worked
+    needs: maturin_release
     runs-on: ubuntu-latest
-    env:
-      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write
     steps:
-    - uses: actions/checkout@v5
-    - name: Publish
-      run: cargo publish
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Authenticate with crates.io
+        id: auth
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish --locked
