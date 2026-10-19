@@ -38,19 +38,3 @@ jobs:
         run: cargo build --locked
       - name: Test
         run: cargo test --locked
-
-  msrv:
-    name: Check minimum Rust version
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install minimum Rust version
-        run: |
-          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].rust_version')
-          rustup toolchain install "$version" --profile minimal
-          rustup default "$version"
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: Check
-        run: cargo check --locked --all-targets

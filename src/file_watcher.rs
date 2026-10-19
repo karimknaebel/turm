@@ -114,10 +114,10 @@ impl FileWatcher {
                 recv(_content_receiver) -> msg => {
                     let res = msg.unwrap();
                     // If we don't have a file watch yet but the file now reads OK, try enabling watch
-                    if !self.watching {
-                        if let (Ok(_), Some(p)) = (&res, &self.file_path) {
-                            self.watching = watcher.watch(Path::new(p), RecursiveMode::NonRecursive).is_ok();
-                        }
+                    if !self.watching
+                        && let (Ok(_), Some(p)) = (&res, &self.file_path)
+                    {
+                        self.watching = watcher.watch(Path::new(p), RecursiveMode::NonRecursive).is_ok();
                     }
                     self.app
                         .send(AppMessage::JobOutput(res.map_err(FileWatcherError::File)))

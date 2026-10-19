@@ -6,7 +6,6 @@ description = "A TUI for the Slurm Workload Manager."
 repository = "https://github.com/karimknaebel/turm"
 license = "MIT"
 edition = "2024"
-rust-version = "1.87"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

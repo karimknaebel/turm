@@ -315,11 +315,11 @@ impl App {
             }
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
-                    if let Some(index) = self.job_index_at(mouse.column, mouse.row) {
-                        if self.job_list_state.selected() != Some(index) {
-                            self.handle(AppMessage::MouseClick(index));
-                            return (false, true);
-                        }
+                    if let Some(index) = self.job_index_at(mouse.column, mouse.row)
+                        && self.job_list_state.selected() != Some(index)
+                    {
+                        self.handle(AppMessage::MouseClick(index));
+                        return (false, true);
                     }
                     (false, false)
                 }
@@ -441,10 +441,10 @@ impl App {
                                 close_dialog = true;
                             }
                             KeyCode::Char(c) if c.is_ascii_digit() => {
-                                if let Some(index) = signal_index_for_digit(c) {
-                                    if index < SCANCEL_SIGNALS.len() {
-                                        *selected_signal = index;
-                                    }
+                                if let Some(index) = signal_index_for_digit(c)
+                                    && index < SCANCEL_SIGNALS.len()
+                                {
+                                    *selected_signal = index;
                                 }
                             }
                             _ => {}
