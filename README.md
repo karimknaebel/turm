@@ -70,7 +70,7 @@ double-click to reset.
 
 ## Open in external pager
 
-When pressing <kbd>p</kdb> to open the log in an external pager, the command is chosen in this order: `--pager`, `$TURM_PAGER`, `$PAGER`, then `less`.
+When pressing <kbd>p</kbd> to open the log in an external pager, the command is chosen in this order: `--pager`, `$TURM_PAGER`, `$PAGER`, then `less`.
 
 ## How it works
 
