@@ -14,7 +14,7 @@ use std::{
 
 use crate::file_watcher::{FileWatcherError, FileWatcherHandle};
 use crate::input::{Input as TerminalInput, PAGER_KEY};
-use crate::job_list::JobList;
+use crate::job_list::{JobColumn, JobList, job_lines};
 use crate::job_watcher::JobWatcherHandle;
 use crate::pager::PagerChild;
 use crate::panel_size::PanelSize;
@@ -71,6 +71,7 @@ pub struct App {
     focus: Focus,
     dialog: Option<Dialog>,
     jobs: Vec<Job>,
+    job_columns: Vec<JobColumn>,
     job_list_state: ListState,
     job_list_horizontal_offset: u16,
     job_output: Result<String, FileWatcherError>,
@@ -114,7 +115,7 @@ pub struct Job {
 }
 
 impl Job {
-    fn id(&self) -> String {
+    pub(crate) fn id(&self) -> String {
         match self.array_step.as_ref() {
             Some(array_step) => format!("{}_{}", self.array_id, array_step),
             None => self.job_id.clone(),
@@ -160,6 +161,7 @@ impl App {
         file_refresh_rate: u64,
         squeue_args: Vec<String>,
         jobs_width: PanelSize,
+        job_columns: Vec<JobColumn>,
         details_height: u16,
     ) -> App {
         let (sender, receiver) = unbounded();
@@ -167,6 +169,7 @@ impl App {
             focus: Focus::Jobs,
             dialog: None,
             jobs: Vec::new(),
+            job_columns,
             _job_watcher: JobWatcherHandle::new(
                 sender.clone(),
                 Duration::from_secs(slurm_refresh_rate),
@@ -679,61 +682,8 @@ impl App {
         f.render_widget(help, content_help[1]);
 
         // Jobs
-        let max_id_len = self.jobs.iter().map(|j| j.id().len()).max().unwrap_or(0);
-        let max_user_len = self.jobs.iter().map(|j| j.user.len()).max().unwrap_or(0);
-        let max_partition_len = self
-            .jobs
-            .iter()
-            .map(|j| j.partition.len())
-            .max()
-            .unwrap_or(0);
-        let max_time_len = self.jobs.iter().map(|j| j.time.len()).max().unwrap_or(0);
-        let max_state_compact_len = self
-            .jobs
-            .iter()
-            .map(|j| j.state_compact.len())
-            .max()
-            .unwrap_or(0);
-        let jobs = self
-            .jobs
-            .iter()
-            .map(|j| {
-                Line::from(vec![
-                    Span::styled(
-                        format!(
-                            "{:<max$.max$}",
-                            j.state_compact,
-                            max = max_state_compact_len
-                        ),
-                        Style::default(),
-                    ),
-                    Span::raw(" "),
-                    Span::styled(
-                        format!("{:<max$.max$}", j.id(), max = max_id_len),
-                        Style::default().fg(Color::Yellow),
-                    ),
-                    Span::raw(" "),
-                    Span::styled(
-                        format!("{:<max$.max$}", j.partition, max = max_partition_len),
-                        Style::default().fg(Color::Blue),
-                    ),
-                    Span::raw(" "),
-                    Span::styled(
-                        format!("{:<max$.max$}", j.user, max = max_user_len),
-                        Style::default().fg(Color::Green),
-                    ),
-                    Span::raw(" "),
-                    Span::styled(
-                        format!("{:>max$.max$}", j.time, max = max_time_len),
-                        Style::default().fg(Color::Red),
-                    ),
-                    Span::raw(" "),
-                    Span::raw(&j.name),
-                ])
-            })
-            .collect();
         let job_list = JobList {
-            lines: jobs,
+            lines: job_lines(&self.jobs, &self.job_columns),
             horizontal_offset: &mut self.job_list_horizontal_offset,
             block: Block::default()
                 .title(format!("─Jobs ({})", self.jobs.len()))

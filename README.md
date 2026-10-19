@@ -10,7 +10,7 @@ A TUI for [Slurm](https://slurm.schedmd.com/), which provides a convenient way t
 
 `turm` accepts the same options as `squeue` (see [man squeue](https://slurm.schedmd.com/squeue.html#SECTION_OPTIONS)). Use `turm --help` to get a list of all available options. For example, to show only your own jobs, sorted by descending job ID, including all job states (i.e., including completed and failed jobs):
 ```shell
-turm --me --sort=-id --states=ALL
+turm --me --sort=-i --states=ALL
 ```
 
 ## Installation

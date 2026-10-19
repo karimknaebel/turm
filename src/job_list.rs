@@ -1,10 +1,67 @@
+use clap::ValueEnum;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Style},
-    text::Line,
+    text::{Line, Span},
     widgets::{Block, List, ListState, Paragraph, StatefulWidget, Widget},
 };
+
+use crate::app::Job;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum JobColumn {
+    State,
+    Id,
+    Partition,
+    User,
+    Time,
+    Name,
+}
+
+impl JobColumn {
+    fn span(self, job: &Job) -> Span<'_> {
+        match self {
+            Self::State => Span::raw(&job.state_compact),
+            Self::Id => Span::styled(job.id(), Style::default().fg(Color::Yellow)),
+            Self::Partition => Span::styled(&job.partition, Style::default().fg(Color::Blue)),
+            Self::User => Span::styled(&job.user, Style::default().fg(Color::Green)),
+            Self::Time => Span::styled(&job.time, Style::default().fg(Color::Red)),
+            Self::Name => Span::raw(&job.name),
+        }
+    }
+}
+
+pub fn job_lines<'a>(jobs: &'a [Job], columns: &[JobColumn]) -> Vec<Line<'a>> {
+    let widths: Vec<usize> = columns
+        .iter()
+        .map(|column| {
+            jobs.iter()
+                .map(|job| column.span(job).width())
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    jobs.iter()
+        .map(|job| {
+            let mut spans = Vec::new();
+            for (index, column) in columns.iter().enumerate() {
+                if index > 0 {
+                    spans.push(Span::raw(" "));
+                }
+                let mut span = column.span(job);
+                let padding = widths[index] - span.width();
+                if *column == JobColumn::Time {
+                    span.content = format!("{}{}", " ".repeat(padding), span.content).into();
+                } else if index + 1 < columns.len() {
+                    span.content = format!("{}{}", span.content, " ".repeat(padding)).into();
+                }
+                spans.push(span);
+            }
+            Line::from(spans)
+        })
+        .collect()
+}
 
 pub struct JobList<'a> {
     pub lines: Vec<Line<'a>>,
@@ -58,7 +115,80 @@ impl StatefulWidget for JobList<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::text::Span;
+
+    fn job(id: &str, user: &str, time: &str, name: &str) -> Job {
+        Job {
+            job_id: id.into(),
+            array_id: String::new(),
+            array_step: None,
+            name: name.into(),
+            state: "RUNNING".into(),
+            state_compact: "R".into(),
+            reason: None,
+            user: user.into(),
+            time: time.into(),
+            time_limit: String::new(),
+            start_time: String::new(),
+            tres: String::new(),
+            partition: "cpu".into(),
+            nodelist: String::new(),
+            stdout: None,
+            stderr: None,
+            command: String::new(),
+        }
+    }
+
+    #[test]
+    fn default_columns_preserve_alignment_and_colors() {
+        let mut jobs = [
+            job("7", "a", "1:00", "first"),
+            job("123", "bob", "12:00", "longer"),
+        ];
+        jobs[1].state_compact = "PD".into();
+        let lines = job_lines(
+            &jobs,
+            &[
+                JobColumn::State,
+                JobColumn::Id,
+                JobColumn::Partition,
+                JobColumn::User,
+                JobColumn::Time,
+                JobColumn::Name,
+            ],
+        );
+        assert_eq!(lines[0].to_string(), "R  7   cpu a    1:00 first");
+        assert_eq!(lines[1].to_string(), "PD 123 cpu bob 12:00 longer");
+        for (index, color) in [
+            (2, Color::Yellow),
+            (4, Color::Blue),
+            (6, Color::Green),
+            (8, Color::Red),
+        ] {
+            assert_eq!(lines[0].spans[index].style.fg, Some(color));
+        }
+    }
+
+    #[test]
+    fn columns_can_be_reordered_and_omitted_with_unicode_alignment() {
+        let jobs = [
+            job("7", "a", "1:00", "界"),
+            job("123", "bob", "12:00", "abc"),
+        ];
+        let lines = job_lines(&jobs, &[JobColumn::Name, JobColumn::Id]);
+        assert_eq!(lines[0].to_string(), "界  7");
+        assert_eq!(lines[1].to_string(), "abc 123");
+        assert_eq!(lines[0].spans[0].width(), lines[1].spans[0].width());
+        assert_eq!(job_lines(&jobs, &[JobColumn::Name])[0].to_string(), "界");
+        assert!(job_lines(&[], &[JobColumn::Name]).is_empty());
+    }
+
+    #[test]
+    fn id_column_uses_array_task_id() {
+        let mut job = job("123", "a", "1:00", "array");
+        job.array_id = "100".into();
+        job.array_step = Some("7".into());
+        assert_eq!(job_lines(&[job], &[JobColumn::Id])[0].to_string(), "100_7");
+    }
 
     #[test]
     fn horizontal_scroll_preserves_styles_selection_and_vertical_navigation() {

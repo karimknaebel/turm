@@ -19,6 +19,8 @@ pub struct SqueueArgs {
     hide: bool,
 
     /// |squeue arg| Comma separated list of jobs IDs to view, default is all.
+    ///
+    /// Job ID syntax: https://slurm.schedmd.com/squeue.html#OPT_jobs
     #[arg(short, long, value_name = "JOBID")]
     job: Option<String>,
 
@@ -31,6 +33,8 @@ pub struct SqueueArgs {
     licenses: Option<String>,
 
     /// |squeue arg| Cluster to issue commands to. Default is current cluster. Cluster with no name will reset to default. Implies `--local`.
+    ///
+    /// Cluster selection: https://slurm.schedmd.com/squeue.html#OPT_clusters
     #[arg(short = 'M', long)]
     clusters: Option<String>,
 
@@ -63,14 +67,20 @@ pub struct SqueueArgs {
     sibling: bool,
 
     /// |squeue arg| Comma separated list of job steps to view, default is all.
+    ///
+    /// Step ID syntax: https://slurm.schedmd.com/squeue.html#OPT_steps
     #[arg(short, long)]
     step: Option<String>,
 
-    /// |squeue arg| Comma separated list of fields to sort on.
+    /// |squeue arg| Comma separated Slurm sort keys (e.g. i for job ID, -M for descending elapsed time).
+    ///
+    /// Sort keys and ordering: https://slurm.schedmd.com/squeue.html#OPT_sort
     #[arg(short = 'S', long, value_name = "FIELDS")]
     sort: Option<String>,
 
-    /// |squeue arg| Comma separated list of states to view, default is pending and running, `--states=all` reports all states.
+    /// |squeue arg| Comma separated states to view, default is pending, running and completing. Accepts names or codes (e.g. RUNNING or R); `--states=all` reports all states.
+    ///
+    /// State names and codes: https://slurm.schedmd.com/squeue.html#SECTION_JOB-STATE-CODES
     #[arg(short = 't', long)]
     states: Option<String>,
 
@@ -79,6 +89,8 @@ pub struct SqueueArgs {
     user: Option<String>,
 
     /// |squeue arg| List of nodes to view, default is all nodes.
+    ///
+    /// Node selection: https://slurm.schedmd.com/squeue.html#OPT_nodelist
     #[arg(short = 'w', long, value_name = "NODES")]
     nodelist: Option<String>,
 }

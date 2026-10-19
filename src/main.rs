@@ -18,6 +18,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use job_list::JobColumn;
 use pager::Pager;
 use panel_size::PanelSize;
 use ratatui::{Terminal, backend::CrosstermBackend};
@@ -59,6 +60,17 @@ struct Cli {
         default_value = "33%"
     )]
     jobs_width: PanelSize,
+
+    /// Jobs list columns in display order, separated by commas.
+    #[arg(
+        long,
+        env = "TURM_JOBS_COLUMNS",
+        value_name = "COLUMNS",
+        value_delimiter = ',',
+        value_enum,
+        default_value = "state,id,partition,user,time,name"
+    )]
+    jobs_columns: Vec<JobColumn>,
 
     /// Initial Details pane height in content lines, excluding borders (0-6, 0 hides it).
     #[arg(
@@ -192,6 +204,7 @@ fn run_app<W: Write>(
         args.file_refresh,
         args.squeue_args.to_vec(),
         args.jobs_width,
+        args.jobs_columns,
         args.details_height,
     );
     loop {
@@ -222,6 +235,49 @@ fn run_app<W: Write>(
 mod tests {
     use super::*;
     use clap::FromArgMatches;
+
+    #[test]
+    fn jobs_columns_options() {
+        let command = Cli::command().mut_arg("jobs_columns", |arg| arg.env(None::<&str>));
+        let defaults =
+            Cli::from_arg_matches(&command.clone().try_get_matches_from(["turm"]).unwrap())
+                .unwrap();
+        assert_eq!(
+            defaults.jobs_columns,
+            [
+                JobColumn::State,
+                JobColumn::Id,
+                JobColumn::Partition,
+                JobColumn::User,
+                JobColumn::Time,
+                JobColumn::Name
+            ]
+        );
+        for (value, columns) in [
+            ("name", vec![JobColumn::Name]),
+            (
+                "name,id,time",
+                vec![JobColumn::Name, JobColumn::Id, JobColumn::Time],
+            ),
+        ] {
+            let cli = Cli::from_arg_matches(
+                &command
+                    .clone()
+                    .try_get_matches_from(["turm", "--jobs-columns", value])
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(cli.jobs_columns, columns);
+        }
+        for value in ["", "unknown", "id,,name", "name,"] {
+            assert!(
+                command
+                    .clone()
+                    .try_get_matches_from(["turm", "--jobs-columns", value])
+                    .is_err()
+            );
+        }
+    }
 
     #[test]
     fn panel_size_options() {
