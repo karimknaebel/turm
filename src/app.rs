@@ -83,6 +83,7 @@ pub struct App {
     job_output_area: Rect,
     content_area: Rect,
     panel_split: PanelSplit,
+    details_split: DetailsSplit,
     pending_input_event: Option<Event>,
     pager_path: Option<PathBuf>,
 }
@@ -143,6 +144,8 @@ pub(crate) enum MouseScrollTarget {
 const SCANCEL_SIGNALS: &[&str] = &["TERM", "INT", "HUP", "USR1", "USR2", "STOP", "CONT", "KILL"];
 const DIALOG_WIDTH: u16 = 80;
 const MIN_PANEL_WIDTH: u16 = 3;
+pub(crate) const MAX_DETAILS_LINES: u16 = 6;
+const MAX_DETAILS_HEIGHT: u16 = MAX_DETAILS_LINES + 2;
 
 impl App {
     pub fn new(
@@ -150,6 +153,7 @@ impl App {
         file_refresh_rate: u64,
         squeue_args: Vec<String>,
         jobs_width: u16,
+        details_lines: u16,
     ) -> App {
         let (sender, receiver) = unbounded();
         Self {
@@ -181,6 +185,14 @@ impl App {
             panel_split: PanelSplit {
                 initial_ratio: Some((jobs_width, 100)),
                 ..PanelSplit::default()
+            },
+            details_split: DetailsSplit {
+                initial_height: Some(if details_lines == 0 {
+                    0
+                } else {
+                    details_lines + 2
+                }),
+                ..DetailsSplit::default()
             },
             pending_input_event: None,
             pager_path: None,
@@ -264,6 +276,8 @@ impl App {
             Event::Key(key) => {
                 self.panel_split.drag = None;
                 self.panel_split.last_click = None;
+                self.details_split.drag = None;
+                self.details_split.last_click = None;
                 if key.code == KeyCode::Char('q') {
                     return (true, false);
                 }
@@ -276,9 +290,15 @@ impl App {
             Event::Paste(_) => (false, false),
             Event::Mouse(_) if self.dialog.is_some() => (false, false),
             Event::Mouse(mouse)
-                if self
-                    .panel_split
-                    .handle_mouse(mouse, self.job_list_area, self.content_area) =>
+                if (self.details_split.drag.is_none()
+                    && self.panel_split.handle_mouse(
+                        mouse,
+                        self.job_list_area,
+                        self.content_area,
+                    ))
+                    || self
+                        .details_split
+                        .handle_mouse(mouse, self.panel_split.areas(self.content_area)[1]) =>
             {
                 (false, true)
             }
@@ -293,7 +313,7 @@ impl App {
                     (false, false)
                 }
                 MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                    if self.panel_split.drag.is_some() {
+                    if self.panel_split.drag.is_some() || self.details_split.drag.is_some() {
                         return (false, false);
                     }
                     let Some(target) = self.mouse_scroll_target(mouse.column, mouse.row) else {
@@ -327,6 +347,7 @@ impl App {
             },
             Event::Resize(_, _) => {
                 self.panel_split.drag = None;
+                self.details_split.drag = None;
                 (false, true)
             }
             _ => (false, false),
@@ -595,10 +616,7 @@ impl App {
         let master_detail = self.panel_split.areas(content_help[0]);
         self.content_area = content_help[0];
 
-        let job_detail_log = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(8), Constraint::Min(3)].as_ref())
-            .split(master_detail[1]);
+        let job_detail_log = self.details_split.areas(master_detail[1]);
 
         // Help
         let help_options = vec![
@@ -1276,6 +1294,76 @@ impl PanelSplit {
     }
 }
 
+#[derive(Default)]
+struct DetailsSplit {
+    initial_height: Option<u16>,
+    height: Option<u16>,
+    drag: Option<(u16, u16)>,
+    last_click: Option<(Instant, u16, u16)>,
+}
+
+impl DetailsSplit {
+    fn areas(&self, area: Rect) -> [Rect; 2] {
+        let height = self
+            .height
+            .or(self.initial_height)
+            .unwrap_or(MAX_DETAILS_HEIGHT)
+            .min(MAX_DETAILS_HEIGHT)
+            .min(area.height.saturating_sub(3));
+        let height = if height < 3 { 0 } else { height };
+        [
+            Rect::new(area.x, area.y, area.width, height),
+            Rect::new(area.x, area.y + height, area.width, area.height - height),
+        ]
+    }
+
+    fn handle_mouse(&mut self, mouse: MouseEvent, area: Rect) -> bool {
+        let details = self.areas(area)[0];
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.drag = None;
+                let last_click = self.last_click.take();
+                if !rect_contains(area, mouse.column, mouse.row)
+                    || mouse.row < details.bottom().saturating_sub(1)
+                    || mouse.row > details.bottom()
+                {
+                    return false;
+                }
+                if last_click.is_some_and(|(time, column, row)| {
+                    time.elapsed() <= Duration::from_millis(400)
+                        && column == mouse.column
+                        && row.abs_diff(mouse.row) <= 1
+                }) {
+                    self.height = None;
+                    return true;
+                }
+                self.last_click = Some((Instant::now(), mouse.column, mouse.row));
+                self.drag = Some((mouse.row, details.height));
+                true
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                self.last_click = None;
+                let Some((row, height)) = self.drag else {
+                    return false;
+                };
+                self.height = Some(
+                    (i32::from(height) + i32::from(mouse.row) - i32::from(row)).clamp(
+                        0,
+                        i32::from(MAX_DETAILS_HEIGHT.min(area.height.saturating_sub(3))),
+                    ) as u16,
+                );
+                true
+            }
+            MouseEventKind::Up(MouseButton::Left) => self.drag.take().is_some(),
+            MouseEventKind::Down(_) => {
+                self.last_click = None;
+                false
+            }
+            _ => false,
+        }
+    }
+}
+
 fn snap_panel_width(width: u16, total: u16) -> u16 {
     if width < MIN_PANEL_WIDTH {
         0
@@ -1397,6 +1485,98 @@ mod tests {
 
     fn jobs_area(split: &PanelSplit, area: Rect) -> Rect {
         split.areas(area)[0]
+    }
+
+    #[test]
+    fn details_drag_shrinks_from_either_border_and_caps_height() {
+        let area = Rect::new(30, 5, 70, 24);
+        for row in [12, 13] {
+            let mut split = DetailsSplit::default();
+            assert!(split.handle_mouse(
+                mouse(MouseEventKind::Down(MouseButton::Left), 40, row),
+                area
+            ));
+            assert_eq!(split.areas(area)[0].height, 8);
+            for (delta, height) in [(0, 8), (-1, 7), (-4, 4), (10, 8)] {
+                assert!(split.handle_mouse(
+                    mouse(
+                        MouseEventKind::Drag(MouseButton::Left),
+                        40,
+                        (i32::from(row) + delta) as u16
+                    ),
+                    area,
+                ));
+                assert_eq!(split.areas(area)[0].height, height);
+                assert_eq!(
+                    split.areas(area)[1],
+                    Rect::new(30, 5 + height, 70, 24 - height)
+                );
+            }
+            assert!(
+                split.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 40, row), area)
+            );
+            assert!(
+                !split.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 40, 5), area)
+            );
+            assert_eq!(split.areas(area)[0].height, 8);
+        }
+    }
+
+    #[test]
+    fn details_can_collapse_reopen_and_reset() {
+        let area = Rect::new(30, 5, 70, 24);
+        let mut split = DetailsSplit::default();
+        split.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 40, 13), area);
+        for row in [7, 6, 5, 0] {
+            split.handle_mouse(
+                mouse(MouseEventKind::Drag(MouseButton::Left), 40, row),
+                area,
+            );
+            assert_eq!(split.areas(area)[0].height, 0);
+            assert_eq!(split.areas(area)[1], area);
+        }
+        split.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 40, 5), area);
+        assert!(split.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 40, 5), area));
+        split.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 40, 9), area);
+        assert_eq!(split.areas(area)[0].height, 4);
+        split.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 40, 9), area);
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+            MouseEventKind::Down(MouseButton::Left),
+        ] {
+            assert!(split.handle_mouse(mouse(kind, 40, 9), area));
+        }
+        assert_eq!(split.areas(area)[0].height, 8);
+        assert!(split.drag.is_none());
+    }
+
+    #[test]
+    fn details_resize_preserves_output_space_and_ignores_content_clicks() {
+        let mut split = DetailsSplit {
+            height: Some(5),
+            ..DetailsSplit::default()
+        };
+        for height in 0..30 {
+            let area = Rect::new(30, 5, 70, height);
+            let [details, output] = split.areas(area);
+            assert!(details.height <= 5);
+            assert!(details.height == 0 || details.height >= 3);
+            assert!(output.height >= height.min(3));
+            assert_eq!(details.height + output.height, height);
+        }
+        assert_eq!(split.areas(Rect::new(30, 5, 70, 30))[0].height, 5);
+        for (column, row) in [(29, 9), (100, 9), (40, 4), (40, 6), (40, 11), (40, 29)] {
+            assert!(!split.handle_mouse(
+                mouse(MouseEventKind::Down(MouseButton::Left), column, row),
+                Rect::new(30, 5, 70, 24)
+            ));
+            assert!(split.drag.is_none());
+        }
+        assert!(!split.handle_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 30, 5),
+            Rect::new(30, 5, 0, 24)
+        ));
     }
 
     #[test]

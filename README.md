@@ -62,6 +62,17 @@ In your `config.fish` or in a separate `completions/turm.fish` file, add the fol
 turm completion fish | source
 ```
 
+## Panel sizes
+
+Use `--jobs-width PERCENT` to set the initial Jobs pane width (default: 30) and
+`--details-lines LINES` to show 0–6 lines of Details content, excluding borders
+(default: 6). Set `--details-lines 0` to start with Details hidden. These options
+can also be set with `TURM_JOBS_WIDTH` and `TURM_DETAILS_LINES`.
+
+Drag the panel borders to resize them, or double-click a divider to restore its
+configured size. When Details is hidden, drag the log pane's top border down to
+reopen it.
+
 ## Open in external pager
 
 When pressing <kbd>p</kdb> to open the log in an external pager, the command is chosen in this order: `--pager`, `$TURM_PAGER`, `$PAGER`, then `less` (or `more` if `less` is not installed).

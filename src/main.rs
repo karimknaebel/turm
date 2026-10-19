@@ -58,6 +58,16 @@ struct Cli {
     )]
     jobs_width: u16,
 
+    /// Initial Details pane content lines, excluding borders (0 hides it).
+    #[arg(
+        long,
+        env = "TURM_DETAILS_LINES",
+        value_name = "LINES",
+        default_value_t = app::MAX_DETAILS_LINES,
+        value_parser = clap::value_parser!(u16).range(0..=i64::from(app::MAX_DETAILS_LINES))
+    )]
+    details_lines: u16,
+
     /// Log viewer command (falls back to PAGER, then less or more).
     #[arg(long, env = "TURM_PAGER", value_name = "COMMAND")]
     pager: Option<String>,
@@ -180,6 +190,7 @@ fn run_app<W: Write>(
         args.file_refresh,
         args.squeue_args.to_vec(),
         args.jobs_width,
+        args.details_lines,
     );
     loop {
         match app.run(terminal.terminal_mut())? {
