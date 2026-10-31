@@ -1,10 +1,16 @@
-# turm
+<p align="center">
+  <img src="assets/turm-icon.svg" alt="turm rook" width="60" height="72" />
+</p>
 
-[![image](https://img.shields.io/pypi/v/turm.svg)](https://pypi.python.org/pypi/turm)
-[![image](https://img.shields.io/crates/v/turm.svg)](https://crates.io/crates/turm)
-[![Conda Version](https://img.shields.io/conda/vn/conda-forge/turm.svg)](https://anaconda.org/conda-forge/turm)
+<h1 align="center">turm</h1>
 
-A TUI for [Slurm](https://slurm.schedmd.com/), which provides a convenient way to manage your cluster jobs.
+<p align="center">
+  <a href="https://pypi.python.org/pypi/turm"><img src="https://img.shields.io/pypi/v/turm.svg" alt="PyPI version" /></a>
+  <a href="https://crates.io/crates/turm"><img src="https://img.shields.io/crates/v/turm.svg" alt="crates.io version" /></a>
+  <a href="https://anaconda.org/conda-forge/turm"><img src="https://img.shields.io/conda/vn/conda-forge/turm.svg" alt="Conda version" /></a>
+</p>
+
+<p align="center">A terminal UI for managing your <a href="https://slurm.schedmd.com/">Slurm</a> cluster jobs.</p>
 
 <img width="100%" alt="turm demo" src="https://github.com/user-attachments/assets/aeb67881-cb43-4b26-8191-fff1cf585c6c" />
 
