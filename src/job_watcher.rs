@@ -20,6 +20,65 @@ struct JobWatcher {
 
 pub struct JobWatcherHandle {}
 
+/// Context needed to resolve slurm filename patterns (e.g. `%j`, `%u`) in
+/// `stdout`/`stderr` paths into concrete paths.
+///
+/// See https://slurm.schedmd.com/sbatch.html#SECTION_%3CB%3Efilename-pattern%3C/B%3E
+struct FilenameContext<'a> {
+    array_master: &'a str,
+    array_id: &'a str,
+    id: &'a str,
+    host: &'a str,
+    user: &'a str,
+    name: &'a str,
+    working_dir: &'a str,
+}
+
+impl FilenameContext<'_> {
+    fn resolve(&self, path: &str) -> Option<PathBuf> {
+        let slurm_no_val = "4294967294";
+        let array_id = if self.array_id == "N/A" {
+            slurm_no_val
+        } else {
+            self.array_id
+        };
+
+        let path = if path.is_empty() {
+            // never happens right now, because `squeue -O stdout` seems to always return something
+            if array_id == slurm_no_val {
+                PathBuf::from(self.working_dir).join("slurm-%J.out")
+            } else {
+                PathBuf::from(self.working_dir).join("slurm-%A_%a.out")
+            }
+            .to_str()
+            .unwrap()
+            .to_owned()
+        } else {
+            path.to_owned()
+        };
+
+        let resolved = PATH_REGEX.replace_all(&path, |caps: &regex::Captures| {
+            match caps.get(0).unwrap().as_str() {
+                "%%" => "%",
+                "%A" => self.array_master,
+                "%a" => array_id,
+                "%J" => self.id,
+                "%j" => self.id,
+                "%N" => self.host.split(',').next().unwrap_or(self.host),
+                "%n" => "0",
+                "%s" => "batch",
+                "%t" => "0",
+                "%u" => self.user,
+                "%x" => self.name,
+                _ => unreachable!(),
+            }
+            .to_string()
+        });
+
+        Some(PathBuf::from(self.working_dir).join(resolved.as_ref())) // works even if `path` is absolute
+    }
+}
+
 impl JobWatcher {
     fn new(app: Sender<AppMessage>, interval: Duration, squeue_args: Vec<String>) -> Self {
         Self {
@@ -82,6 +141,16 @@ impl JobWatcher {
         let node_list = parts[17];
         let working_dir = parts[18];
 
+        let filename_ctx = FilenameContext {
+            array_master: array_job_id,
+            array_id: array_task_id,
+            id,
+            host: node_list,
+            user,
+            name,
+            working_dir,
+        };
+
         Some(Job {
             job_id: id.to_owned(),
             array_id: array_job_id.to_owned(),
@@ -105,30 +174,12 @@ impl JobWatcher {
             partition: partition.to_owned(),
             nodelist: nodelist.to_owned(),
             command: command.to_owned(),
-            stdout: Self::resolve_path(
-                stdout,
-                array_job_id,
-                array_task_id,
-                id,
-                node_list,
-                user,
-                name,
-                working_dir,
-            ),
-            stderr: Self::resolve_path(
-                stderr,
-                array_job_id,
-                array_task_id,
-                id,
-                node_list,
-                user,
-                name,
-                working_dir,
-            ), // TODO fill all fields
+            stdout: filename_ctx.resolve(stdout),
+            stderr: filename_ctx.resolve(stderr),
         })
     }
 
-    fn run(&mut self) -> Self {
+    fn run(&mut self) {
         let output_format = Self::FIELDS
             .map(|s| s.to_owned() + ":" + Self::OUTPUT_SEPARATOR)
             .join(",");
@@ -150,65 +201,6 @@ impl JobWatcher {
             self.app.send(AppMessage::Jobs(jobs)).unwrap();
             thread::sleep(self.interval);
         }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn resolve_path(
-        path: &str,
-        array_master: &str,
-        array_id: &str,
-        id: &str,
-        host: &str,
-        user: &str,
-        name: &str,
-        working_dir: &str,
-    ) -> Option<PathBuf> {
-        let mut path = path.to_owned();
-        let slurm_no_val = "4294967294";
-        let array_id = if array_id == "N/A" {
-            slurm_no_val
-        } else {
-            array_id
-        };
-
-        if path.is_empty() {
-            // never happens right now, because `squeue -O stdout` seems to always return something
-            path = if array_id == slurm_no_val {
-                PathBuf::from(working_dir).join("slurm-%J.out")
-            } else {
-                PathBuf::from(working_dir).join("slurm-%A_%a.out")
-            }
-            .to_str()
-            .unwrap()
-            .to_owned();
-        };
-
-        for cap in PATH_REGEX
-            .captures_iter(&path.clone())
-            .collect::<Vec<_>>() // TODO: this is stupid, there has to be a better way to reverse the captures...
-            .iter()
-            .rev()
-        {
-            let m = cap.get(0).unwrap();
-            let replacement = match m.as_str() {
-                "%%" => "%",
-                "%A" => array_master,
-                "%a" => array_id,
-                "%J" => id,
-                "%j" => id,
-                "%N" => host.split(',').next().unwrap_or(host),
-                "%n" => "0",
-                "%s" => "batch",
-                "%t" => "0",
-                "%u" => user,
-                "%x" => name,
-                _ => unreachable!(),
-            };
-
-            path.replace_range(m.range(), replacement);
-        }
-
-        Some(PathBuf::from(working_dir).join(path)) // works even if `path` is absolute
     }
 }
 
@@ -323,211 +315,92 @@ mod tests {
         assert!(JobWatcher::parse_line("").is_none());
     }
 
-    #[test]
-    fn resolve_path_percent_j_substitution() {
-        let result = JobWatcher::resolve_path(
-            "/out/%j.log",
-            "100",
-            "N/A",
-            "42",
-            "node01",
-            "alice",
-            "myjob",
-            "/work",
-        )
-        .unwrap();
-        assert_eq!(result, PathBuf::from("/out/42.log"));
+    fn ctx<'a>() -> FilenameContext<'a> {
+        FilenameContext {
+            array_master: "100",
+            array_id: "2",
+            id: "12345",
+            host: "node01,node02",
+            user: "alice",
+            name: "myjob",
+            working_dir: "/home/alice",
+        }
     }
 
     #[test]
-    fn resolve_path_percent_capital_j_substitution() {
-        let result = JobWatcher::resolve_path(
-            "/out/%J.log",
-            "100",
-            "N/A",
-            "99",
-            "node01",
-            "alice",
-            "myjob",
-            "/work",
-        )
-        .unwrap();
-        assert_eq!(result, PathBuf::from("/out/99.log"));
+    fn substitutes_job_id_and_user() {
+        let resolved = ctx().resolve("out-%j-%u.log").unwrap();
+        assert_eq!(resolved, PathBuf::from("/home/alice/out-12345-alice.log"));
     }
 
     #[test]
-    fn resolve_path_percent_u_substitution() {
-        let result = JobWatcher::resolve_path(
-            "/scratch/%u/out.log",
-            "100",
-            "N/A",
-            "1",
-            "node01",
-            "carol",
-            "job",
-            "/work",
-        )
-        .unwrap();
-        assert_eq!(result, PathBuf::from("/scratch/carol/out.log"));
+    fn substitutes_first_node_from_list() {
+        let resolved = ctx().resolve("%N.out").unwrap();
+        assert_eq!(resolved, PathBuf::from("/home/alice/node01.out"));
     }
 
     #[test]
-    fn resolve_path_percent_x_substitution() {
-        let result = JobWatcher::resolve_path(
-            "/logs/%x.out",
-            "100",
-            "N/A",
-            "5",
-            "node01",
-            "dave",
-            "simulation",
-            "/work",
-        )
-        .unwrap();
-        assert_eq!(result, PathBuf::from("/logs/simulation.out"));
+    fn substitutes_first_node_from_list_single_node() {
+        let context = FilenameContext {
+            host: "node01",
+            ..ctx()
+        };
+        let resolved = context.resolve("%N.out").unwrap();
+        assert_eq!(resolved, PathBuf::from("/home/alice/node01.out"));
     }
 
     #[test]
-    fn resolve_path_percent_a_substitution() {
-        let result = JobWatcher::resolve_path(
-            "/out/%a.log",
-            "200",
-            "7",
-            "201",
-            "node01",
-            "alice",
-            "job",
-            "/work",
-        )
-        .unwrap();
-        assert_eq!(result, PathBuf::from("/out/7.log"));
+    fn na_array_id_uses_sentinel() {
+        let context = FilenameContext {
+            array_id: "N/A",
+            ..ctx()
+        };
+        let resolved = context.resolve("%a.out").unwrap();
+        assert_eq!(resolved, PathBuf::from("/home/alice/4294967294.out"));
     }
 
     #[test]
-    fn resolve_path_percent_capital_a_substitution() {
-        let result = JobWatcher::resolve_path(
-            "/out/%A.log",
-            "200",
-            "7",
-            "201",
-            "node01",
-            "alice",
-            "job",
-            "/work",
-        )
-        .unwrap();
-        assert_eq!(result, PathBuf::from("/out/200.log"));
+    fn substitutes_percent_a_with_real_id() {
+        let resolved = ctx().resolve("%a.out").unwrap();
+        assert_eq!(resolved, PathBuf::from("/home/alice/2.out"));
     }
 
     #[test]
-    fn resolve_path_percent_capital_n_single_node() {
-        let result = JobWatcher::resolve_path(
-            "/logs/%N.out",
-            "1",
-            "N/A",
-            "10",
-            "node01",
-            "alice",
-            "job",
-            "/work",
-        )
-        .unwrap();
-        assert_eq!(result, PathBuf::from("/logs/node01.out"));
+    fn substitutes_percent_capital_a() {
+        let resolved = ctx().resolve("%A.out").unwrap();
+        assert_eq!(resolved, PathBuf::from("/home/alice/100.out"));
     }
 
     #[test]
-    fn resolve_path_percent_capital_n_multi_node_picks_first() {
-        let result = JobWatcher::resolve_path(
-            "/logs/%N.out",
-            "1",
-            "N/A",
-            "10",
-            "node01,node02,node03",
-            "alice",
-            "job",
-            "/work",
-        )
-        .unwrap();
-        assert_eq!(result, PathBuf::from("/logs/node01.out"));
+    fn substitutes_percent_capital_j() {
+        let resolved = ctx().resolve("%J.out").unwrap();
+        assert_eq!(resolved, PathBuf::from("/home/alice/12345.out"));
     }
 
     #[test]
-    fn resolve_path_double_percent_becomes_literal() {
-        let result = JobWatcher::resolve_path(
-            "/logs/100%%.out",
-            "1",
-            "N/A",
-            "10",
-            "node01",
-            "alice",
-            "job",
-            "/work",
-        )
-        .unwrap();
-        assert_eq!(result, PathBuf::from("/logs/100%.out"));
+    fn substitutes_percent_x() {
+        let resolved = ctx().resolve("%x.out").unwrap();
+        assert_eq!(resolved, PathBuf::from("/home/alice/myjob.out"));
     }
 
     #[test]
-    fn resolve_path_na_array_id_becomes_sentinel() {
-        let result = JobWatcher::resolve_path(
-            "/out/%a.log",
-            "100",
-            "N/A",
-            "55",
-            "node01",
-            "alice",
-            "job",
-            "/work",
-        )
-        .unwrap();
-        assert_eq!(result, PathBuf::from("/out/4294967294.log"));
+    fn absolute_path_is_preserved() {
+        let resolved = ctx().resolve("/scratch/%u/%j.out").unwrap();
+        assert_eq!(resolved, PathBuf::from("/scratch/alice/12345.out"));
     }
 
     #[test]
-    fn resolve_path_absolute_path_ignores_working_dir() {
-        let result = JobWatcher::resolve_path(
-            "/abs/path/out.log",
-            "1",
-            "N/A",
-            "1",
-            "node01",
-            "alice",
-            "job",
-            "/work",
-        )
-        .unwrap();
-        assert_eq!(result, PathBuf::from("/abs/path/out.log"));
+    fn empty_path_falls_back_to_working_dir() {
+        let resolved = ctx().resolve("").unwrap();
+        assert_eq!(resolved, PathBuf::from("/home/alice/slurm-100_2.out"));
     }
 
     #[test]
-    fn resolve_path_relative_path_is_joined_onto_working_dir() {
-        let result = JobWatcher::resolve_path(
-            "logs/out.log",
-            "1",
-            "N/A",
-            "1",
-            "node01",
-            "alice",
-            "job",
-            "/work",
-        )
-        .unwrap();
-        assert_eq!(result, PathBuf::from("/work/logs/out.log"));
-    }
-
-    #[test]
-    fn resolve_path_multiple_patterns_in_one_path() {
-        let result = JobWatcher::resolve_path(
-            "/scratch/%u/%x-%j.out",
-            "500",
-            "N/A",
-            "501",
-            "node01",
-            "eve",
-            "sim",
-            "/home/eve",
-        )
-        .unwrap();
-        assert_eq!(result, PathBuf::from("/scratch/eve/sim-501.out"));
+    fn literal_percent_and_misc_specifiers() {
+        let resolved = ctx().resolve("%%literal-%n-%s-%t.out").unwrap();
+        assert_eq!(
+            resolved,
+            PathBuf::from("/home/alice/%literal-0-batch-0.out")
+        );
     }
 }
