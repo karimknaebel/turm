@@ -44,6 +44,7 @@ pub enum Dialog {
     SelectCancelSignal { id: String, selected_signal: usize },
     EditTimeLimit { id: String, input: Input },
     CommandError { command: String, output: String },
+    Help,
 }
 
 pub enum AppExit {
@@ -155,6 +156,25 @@ pub(crate) enum MouseScrollTarget {
     Output,
 }
 
+const KEYBINDINGS: &[(&str, &str)] = &[
+    ("q", "quit"),
+    ("?", "toggle this help"),
+    ("⏶/⏷ j/k", "select job"),
+    ("g/G", "first/last job"),
+    ("ctrl-u/ctrl-d", "half page up/down"),
+    ("←/→ h/l", "scroll jobs horizontally"),
+    ("pgup/pgdown", "scroll output (shift: fast)"),
+    ("home/end", "output top/bottom"),
+    ("c", "cancel job"),
+    ("C", "send signal to job"),
+    ("t", "set time limit"),
+    ("o", "toggle stdout/stderr"),
+    ("w", "toggle text wrap"),
+    ("p", "open output in pager"),
+    ("n", "show nodes"),
+    ("esc", "close dialog"),
+    ("enter", "confirm"),
+];
 const SCANCEL_SIGNALS: &[&str] = &["TERM", "INT", "HUP", "USR1", "USR2", "STOP", "CONT", "KILL"];
 const DIALOG_WIDTH: u16 = 80;
 const MIN_PANEL_SIZE: u16 = 3;
@@ -491,6 +511,12 @@ impl App {
                                 input.handle_event(&Event::Key(key));
                             }
                         },
+                        Dialog::Help => match key.code {
+                            KeyCode::Enter | KeyCode::Esc | KeyCode::Char('?') => {
+                                close_dialog = true;
+                            }
+                            _ => {}
+                        },
                         Dialog::CommandError { .. } => match key.code {
                             KeyCode::Enter | KeyCode::Esc => {
                                 close_dialog = true;
@@ -618,6 +644,7 @@ impl App {
                             self.pager_path = self.selected_log_path().cloned();
                         }
                         KeyCode::Char('n') => self.set_nodes_visible(true),
+                        KeyCode::Char('?') => self.dialog = Some(Dialog::Help),
                         _ => {}
                     };
                 }
@@ -677,20 +704,12 @@ impl App {
         let job_detail_log = self.details_split.areas(master_detail[1]);
 
         // Help
-        let help_options = vec![
+        let help_options = [
             ("q", "quit"),
-            ("⏶/⏷", "navigate"),
-            ("←/→", "scroll jobs"),
-            ("pgup/pgdown", "scroll"),
-            ("home/end", "top/bottom"),
-            ("esc", "cancel"),
-            ("enter", "confirm"),
             ("c/C", "cancel/signal"),
-            ("t", "set time limit"),
-            ("o", "toggle stdout/stderr"),
-            ("w", "toggle text wrap"),
-            ("p", "open in pager"),
+            ("p", "pager"),
             ("n", "nodes"),
+            ("?", "help"),
         ];
         let help_options = if self.nodes_visible() {
             vec![
@@ -700,7 +719,7 @@ impl App {
                 ("n/esc", "jobs"),
             ]
         } else {
-            help_options
+            help_options.to_vec()
         };
         let blue_style = Style::default().fg(Color::Blue);
         let light_blue_style = Style::default().fg(Color::LightBlue);
@@ -958,6 +977,33 @@ impl App {
                         .min(inner.x.saturating_add(inner.width.saturating_sub(1)));
                     let cursor_y = inner.y;
                     f.set_cursor_position((cursor_x, cursor_y));
+                }
+                Dialog::Help => {
+                    let key_width = KEYBINDINGS
+                        .iter()
+                        .map(|(k, _)| k.chars().count())
+                        .max()
+                        .unwrap_or(0);
+                    let lines: Vec<Line> = KEYBINDINGS
+                        .iter()
+                        .map(|(key, description)| {
+                            Line::from(vec![
+                                Span::styled(
+                                    format!("{key:>key_width$}  "),
+                                    Style::default().fg(Color::Blue),
+                                ),
+                                Span::raw(*description),
+                            ])
+                        })
+                        .collect();
+                    render_dialog(
+                        f,
+                        "Keybindings",
+                        Color::Green,
+                        lines.len() as u16 + 2,
+                        Text::from(lines),
+                        None,
+                    );
                 }
                 Dialog::CommandError { command, output } => {
                     let dialog_text = format!("Command: {command}\n\n{output}");
