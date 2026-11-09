@@ -16,6 +16,7 @@ use crate::file_watcher::{FileWatcherError, FileWatcherHandle};
 use crate::input::{Input as TerminalInput, PAGER_KEY};
 use crate::job_list::{JobColumn, JobList, job_lines};
 use crate::job_watcher::JobWatcherHandle;
+use crate::node_watcher::{Node, NodeWatcherHandle, percent, summary};
 use crate::pager::PagerChild;
 use crate::panel_size::PanelSize;
 
@@ -31,6 +32,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, ListState, Paragraph, Wrap},
 };
 use std::io;
+use std::sync::atomic::Ordering;
 use tui_input::{Input, backend::crossterm::EventHandler};
 
 pub enum Focus {
@@ -79,6 +81,9 @@ pub struct App {
     job_output_offset: u16,
     job_output_wrap: bool,
     _job_watcher: JobWatcherHandle,
+    nodes: Vec<Node>,
+    node_watcher: NodeWatcherHandle,
+    nodes_offset: u16,
     job_output_watcher: FileWatcherHandle,
     // sender: Sender<AppMessage>,
     receiver: Receiver<AppMessage>,
@@ -125,6 +130,7 @@ impl Job {
 
 pub enum AppMessage {
     Jobs(Vec<Job>),
+    Nodes(Vec<Node>),
     JobOutput(Result<String, FileWatcherError>),
     Key(KeyEvent),
     MouseClick(usize),
@@ -175,6 +181,12 @@ impl App {
                 Duration::from_secs(slurm_refresh_rate),
                 squeue_args,
             ),
+            nodes: Vec::new(),
+            node_watcher: NodeWatcherHandle::new(
+                sender.clone(),
+                Duration::from_secs(slurm_refresh_rate),
+            ),
+            nodes_offset: 0,
             job_list_state: ListState::default(),
             job_list_horizontal_offset: 0,
             job_output: Ok("".to_string()),
@@ -299,7 +311,7 @@ impl App {
                 (false, true)
             }
             Event::Paste(_) => (false, false),
-            Event::Mouse(_) if self.dialog.is_some() => (false, false),
+            Event::Mouse(_) if self.dialog.is_some() || self.nodes_visible() => (false, false),
             Event::Mouse(mouse)
                 if (self.details_split.drag.is_none()
                     && self.panel_split.handle_mouse(
@@ -400,9 +412,25 @@ impl App {
                     self.job_list_state.select_first();
                 }
             }
+            AppMessage::Nodes(nodes) => self.nodes = nodes,
             AppMessage::JobOutput(content) => self.job_output = content,
             AppMessage::Key(key) => {
-                if self.dialog.is_some() {
+                if self.nodes_visible() {
+                    // job keys stay disabled so e.g. `c` can't cancel a hidden job
+                    let last = self.nodes.len().saturating_sub(1) as u16;
+                    match key.code {
+                        KeyCode::Char('n') | KeyCode::Esc => self.set_nodes_visible(false),
+                        KeyCode::Char('k') | KeyCode::Up => {
+                            self.nodes_offset = self.nodes_offset.saturating_sub(1)
+                        }
+                        KeyCode::Char('j') | KeyCode::Down => {
+                            self.nodes_offset = self.nodes_offset.saturating_add(1).min(last)
+                        }
+                        KeyCode::Char('g') | KeyCode::Home => self.nodes_offset = 0,
+                        KeyCode::Char('G') | KeyCode::End => self.nodes_offset = last,
+                        _ => {}
+                    }
+                } else if self.dialog.is_some() {
                     let mut close_dialog = false;
                     let mut scancel_request = None;
                     let mut timelimit_request = None;
@@ -589,6 +617,7 @@ impl App {
                         PAGER_KEY => {
                             self.pager_path = self.selected_log_path().cloned();
                         }
+                        KeyCode::Char('n') => self.set_nodes_visible(true),
                         _ => {}
                     };
                 }
@@ -661,7 +690,18 @@ impl App {
             ("o", "toggle stdout/stderr"),
             ("w", "toggle text wrap"),
             ("p", "open in pager"),
+            ("n", "nodes"),
         ];
+        let help_options = if self.nodes_visible() {
+            vec![
+                ("q", "quit"),
+                ("⏶/⏷", "scroll"),
+                ("home/end", "top/bottom"),
+                ("n/esc", "jobs"),
+            ]
+        } else {
+            help_options
+        };
         let blue_style = Style::default().fg(Color::Blue);
         let light_blue_style = Style::default().fg(Color::LightBlue);
 
@@ -825,6 +865,10 @@ impl App {
         .block(log_block);
 
         f.render_widget(log, log_area);
+
+        if self.nodes_visible() {
+            self.render_nodes(f, content_help[0]);
+        }
 
         if let Some(dialog) = &self.dialog {
             match dialog {
@@ -1069,6 +1113,53 @@ fn fit_text(
 }
 
 impl App {
+    fn nodes_visible(&self) -> bool {
+        self.node_watcher.active.load(Ordering::Relaxed)
+    }
+
+    fn set_nodes_visible(&mut self, visible: bool) {
+        self.node_watcher.active.store(visible, Ordering::Relaxed);
+    }
+
+    fn render_nodes(&mut self, f: &mut Frame, area: Rect) {
+        let name_width = self.nodes.iter().map(|n| n.name.len()).max().unwrap_or(0);
+        let lines: Vec<Line> = self
+            .nodes
+            .iter()
+            .map(|n| {
+                Line::from(vec![
+                    Span::raw(format!("{:<name_width$}  ", n.name)),
+                    Span::styled(
+                        format!("{:<8}", n.state),
+                        Style::default().fg(Color::Yellow),
+                    ),
+                    Span::raw(format!(
+                        "CPU {:>4}/{:<4} ({:>3}%)  load {:>7}  Mem {:>5}/{:<6} ({:>3}%)",
+                        n.cpus_alloc,
+                        n.cpus_total,
+                        percent(n.cpus_alloc, n.cpus_total),
+                        n.cpu_load,
+                        n.mem_alloc / 1024,
+                        format!("{}G", n.mem_total / 1024),
+                        percent(n.mem_alloc, n.mem_total),
+                    )),
+                ])
+            })
+            .collect();
+        self.nodes_offset = self
+            .nodes_offset
+            .min(self.nodes.len().saturating_sub(1) as u16);
+        let nodes = Paragraph::new(lines).scroll((self.nodes_offset, 0)).block(
+            Block::default()
+                .title(format!("─Nodes─{}", summary(&self.nodes)))
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Green)),
+        );
+        f.render_widget(Clear, area);
+        f.render_widget(nodes, area);
+    }
+
     fn selected_job(&self) -> Option<&Job> {
         self.job_list_state
             .selected()

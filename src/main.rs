@@ -3,6 +3,7 @@ mod file_watcher;
 mod input;
 mod job_list;
 mod job_watcher;
+mod node_watcher;
 mod pager;
 mod panel_size;
 mod squeue_args;
