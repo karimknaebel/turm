@@ -92,6 +92,7 @@ pub struct App {
     output_file_view: OutputFileView,
     job_list_height: u16,
     job_list_area: Rect,
+    node_list_area: Rect,
     job_output_area: Rect,
     content_area: Rect,
     panel_split: PanelSplit,
@@ -154,6 +155,7 @@ pub(crate) enum MouseWheelDirection {
 pub(crate) enum MouseScrollTarget {
     Jobs,
     Output,
+    Nodes,
 }
 
 const KEYBINDINGS: &[(&str, &str)] = &[
@@ -171,7 +173,7 @@ const KEYBINDINGS: &[(&str, &str)] = &[
     ("o", "toggle stdout/stderr"),
     ("w", "toggle text wrap"),
     ("p", "open output in pager"),
-    ("n", "show nodes"),
+    ("n", "toggle nodes panel"),
     ("esc", "close dialog"),
     ("enter", "confirm"),
 ];
@@ -223,6 +225,7 @@ impl App {
             output_file_view: OutputFileView::default(),
             job_list_height: 0,
             job_list_area: Rect::default(),
+            node_list_area: Rect::default(),
             job_output_area: Rect::default(),
             content_area: Rect::default(),
             panel_split: PanelSplit {
@@ -331,7 +334,7 @@ impl App {
                 (false, true)
             }
             Event::Paste(_) => (false, false),
-            Event::Mouse(_) if self.dialog.is_some() || self.nodes_visible() => (false, false),
+            Event::Mouse(_) if self.dialog.is_some() => (false, false),
             Event::Mouse(mouse)
                 if (self.details_split.drag.is_none()
                     && self.panel_split.handle_mouse(
@@ -405,6 +408,8 @@ impl App {
             Some(MouseScrollTarget::Jobs)
         } else if rect_contains(self.job_output_area, column, row) {
             Some(MouseScrollTarget::Output)
+        } else if rect_contains(self.node_list_area, column, row) {
+            Some(MouseScrollTarget::Nodes)
         } else {
             None
         }
@@ -435,22 +440,7 @@ impl App {
             AppMessage::Nodes(nodes) => self.nodes = nodes,
             AppMessage::JobOutput(content) => self.job_output = content,
             AppMessage::Key(key) => {
-                if self.nodes_visible() {
-                    // job keys stay disabled so e.g. `c` can't cancel a hidden job
-                    let last = self.nodes.len().saturating_sub(1) as u16;
-                    match key.code {
-                        KeyCode::Char('n') | KeyCode::Esc => self.set_nodes_visible(false),
-                        KeyCode::Char('k') | KeyCode::Up => {
-                            self.nodes_offset = self.nodes_offset.saturating_sub(1)
-                        }
-                        KeyCode::Char('j') | KeyCode::Down => {
-                            self.nodes_offset = self.nodes_offset.saturating_add(1).min(last)
-                        }
-                        KeyCode::Char('g') | KeyCode::Home => self.nodes_offset = 0,
-                        KeyCode::Char('G') | KeyCode::End => self.nodes_offset = last,
-                        _ => {}
-                    }
-                } else if self.dialog.is_some() {
+                if self.dialog.is_some() {
                     let mut close_dialog = false;
                     let mut scancel_request = None;
                     let mut timelimit_request = None;
@@ -643,7 +633,7 @@ impl App {
                         PAGER_KEY => {
                             self.pager_path = self.selected_log_path().cloned();
                         }
-                        KeyCode::Char('n') => self.set_nodes_visible(true),
+                        KeyCode::Char('n') => self.set_nodes_visible(!self.nodes_visible()),
                         KeyCode::Char('?') => self.dialog = Some(Dialog::Help),
                         _ => {}
                     };
@@ -672,6 +662,15 @@ impl App {
                                 self.job_list_horizontal_offset =
                                     self.job_list_horizontal_offset.saturating_add(amount);
                             }
+                        },
+                        MouseScrollTarget::Nodes => match direction {
+                            MouseWheelDirection::Up => {
+                                self.nodes_offset = self.nodes_offset.saturating_sub(amount)
+                            }
+                            MouseWheelDirection::Down => {
+                                self.nodes_offset = self.nodes_offset.saturating_add(amount)
+                            }
+                            MouseWheelDirection::Left | MouseWheelDirection::Right => {}
                         },
                         MouseScrollTarget::Output => match direction {
                             MouseWheelDirection::Up => self.scroll_job_output_up_by(amount),
@@ -711,16 +710,6 @@ impl App {
             ("n", "nodes"),
             ("?", "help"),
         ];
-        let help_options = if self.nodes_visible() {
-            vec![
-                ("q", "quit"),
-                ("⏶/⏷", "scroll"),
-                ("home/end", "top/bottom"),
-                ("n/esc", "jobs"),
-            ]
-        } else {
-            help_options.to_vec()
-        };
         let blue_style = Style::default().fg(Color::Blue);
         let light_blue_style = Style::default().fg(Color::LightBlue);
 
@@ -740,7 +729,21 @@ impl App {
         let help = Paragraph::new(help);
         f.render_widget(help, content_help[1]);
 
-        // Jobs
+        // Jobs, with the nodes panel below when visible
+        let (jobs_area, nodes_area) = if self.nodes_visible() {
+            let column = master_detail[0];
+            let nodes_height = (self.nodes.len() as u16 + 2).min(column.height / 2);
+            let [jobs, nodes] =
+                Layout::vertical([Constraint::Min(0), Constraint::Length(nodes_height)])
+                    .areas(column);
+            (jobs, nodes)
+        } else {
+            (master_detail[0], Rect::default())
+        };
+        self.node_list_area = nodes_area;
+        if self.nodes_visible() {
+            self.render_nodes(f, nodes_area);
+        }
         let job_list = JobList {
             lines: job_lines(&self.jobs, &self.job_columns),
             horizontal_offset: &mut self.job_list_horizontal_offset,
@@ -756,9 +759,9 @@ impl App {
                     }
                 }),
         };
-        f.render_stateful_widget(job_list, master_detail[0], &mut self.job_list_state);
-        self.job_list_height = master_detail[0].height.saturating_sub(2); // account for borders
-        self.job_list_area = master_detail[0];
+        f.render_stateful_widget(job_list, jobs_area, &mut self.job_list_state);
+        self.job_list_height = jobs_area.height.saturating_sub(2); // account for borders
+        self.job_list_area = jobs_area;
 
         // Job details
 
@@ -884,10 +887,6 @@ impl App {
         .block(log_block);
 
         f.render_widget(log, log_area);
-
-        if self.nodes_visible() {
-            self.render_nodes(f, content_help[0]);
-        }
 
         if let Some(dialog) = &self.dialog {
             match dialog {
@@ -1174,13 +1173,13 @@ impl App {
             .iter()
             .map(|n| {
                 Line::from(vec![
-                    Span::raw(format!("{:<name_width$}  ", n.name)),
+                    Span::raw(format!("{:<name_width$} ", n.name)),
                     Span::styled(
-                        format!("{:<8}", n.state),
+                        format!("{:<6}", n.state),
                         Style::default().fg(Color::Yellow),
                     ),
                     Span::raw(format!(
-                        "CPU {:>4}/{:<4} ({:>3}%)  load {:>7}  Mem {:>5}/{:<6} ({:>3}%)",
+                        " cpu {:>3}/{:<3} {:>3}%  ld {:>5}  mem {:>4}/{:<5} {:>3}%",
                         n.cpus_alloc,
                         n.cpus_total,
                         percent(n.cpus_alloc, n.cpus_total),
@@ -1192,17 +1191,18 @@ impl App {
                 ])
             })
             .collect();
+        let (states, totals) = summary(&self.nodes);
+        let visible = area.height.saturating_sub(2) as usize;
         self.nodes_offset = self
             .nodes_offset
-            .min(self.nodes.len().saturating_sub(1) as u16);
+            .min(self.nodes.len().saturating_sub(visible) as u16);
         let nodes = Paragraph::new(lines).scroll((self.nodes_offset, 0)).block(
             Block::default()
-                .title(format!("─Nodes─{}", summary(&self.nodes)))
+                .title(format!("─Nodes ({})─{states}", self.nodes.len()))
+                .title_bottom(format!("─{totals}"))
                 .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(Color::Green)),
+                .border_type(BorderType::Rounded),
         );
-        f.render_widget(Clear, area);
         f.render_widget(nodes, area);
     }
 

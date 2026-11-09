@@ -52,8 +52,8 @@ pub fn percent(part: u64, total: u64) -> u64 {
     (part * 100).checked_div(total).unwrap_or(0)
 }
 
-/// One-line cluster summary: node count per state, CPU and memory allocation.
-pub fn summary(nodes: &[Node]) -> String {
+/// Cluster summary: node count per state, and total CPU and memory allocation.
+pub fn summary(nodes: &[Node]) -> (String, String) {
     let mut states = BTreeMap::new();
     for n in nodes {
         *states.entry(n.state.as_str()).or_insert(0) += 1;
@@ -71,14 +71,14 @@ pub fn summary(nodes: &[Node]) -> String {
             mt + n.mem_total,
         )
     });
-    format!(
-        "{} nodes ({states}) │ CPU {ca}/{ct} ({}%) │ Mem {}/{}G ({}%)",
-        nodes.len(),
+    let totals = format!(
+        "CPU {ca}/{ct} {}% │ Mem {}/{}G {}%",
         percent(ca, ct),
         ma / 1024,
         mt / 1024,
         percent(ma, mt),
-    )
+    );
+    (states, totals)
 }
 
 impl NodeWatcherHandle {
@@ -137,10 +137,9 @@ mod tests {
         assert_eq!(b.name, "n2");
         assert!(parse_line(&line(&["n3", "idle", "bad", "0", "0", "0"])).is_none());
         assert!(parse_line("garbage").is_none());
-        assert_eq!(
-            summary(&[a, b]),
-            "2 nodes (down* 1, mix 1) │ CPU 4/24 (16%) │ Mem 2/16G (12%)"
-        );
-        assert_eq!(summary(&[]), "0 nodes () │ CPU 0/0 (0%) │ Mem 0/0G (0%)");
+        let (states, totals) = summary(&[a, b]);
+        assert_eq!(states, "down* 1, mix 1");
+        assert_eq!(totals, "CPU 4/24 16% │ Mem 2/16G 12%");
+        assert_eq!(summary(&[]).1, "CPU 0/0 0% │ Mem 0/0G 0%");
     }
 }
